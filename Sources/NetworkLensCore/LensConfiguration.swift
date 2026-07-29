@@ -24,20 +24,53 @@ public struct LensConfiguration: Sendable {
     /// Cap on bytes retained from a response body.
     public var maxCapturedResponseBodyBytes: Int
 
+    /// Hosts treated as production. Request breakpoints refuse to arm against
+    /// these, because an edited request creates real records on a real backend.
+    /// Response breakpoints are unaffected — they never leave the device.
+    ///
+    /// Each pattern matches the host if it is equal to it, or if the host ends
+    /// with `"." + pattern`, so `"api.acme.com"` covers `"eu.api.acme.com"`.
+    /// A leading `*.` is accepted and stripped.
+    public var productionHostPatterns: [String]
+
+    /// Keep breakpoints and perturbations across launches. Off by default:
+    /// a forgotten breakpoint that survives a relaunch is indistinguishable
+    /// from a hung app.
+    public var keepBreakpointsAcrossLaunches: Bool
+
     public init(
         matchers: [RequestMatcher] = [PathMatcher()],
         redactor: Redactor = DefaultRedactor(),
         maxStoredExchanges: Int = 500,
         automaticScreenAttribution: Bool = true,
         maxCapturedRequestBodyBytes: Int = 1_048_576,
-        maxCapturedResponseBodyBytes: Int = 1_048_576
+        maxCapturedResponseBodyBytes: Int = 1_048_576,
+        productionHostPatterns: [String] = [],
+        keepBreakpointsAcrossLaunches: Bool = false
     ) {
+        self.productionHostPatterns = productionHostPatterns
+        self.keepBreakpointsAcrossLaunches = keepBreakpointsAcrossLaunches
         self.matchers = matchers
         self.redactor = redactor
         self.maxStoredExchanges = maxStoredExchanges
         self.automaticScreenAttribution = automaticScreenAttribution
         self.maxCapturedRequestBodyBytes = maxCapturedRequestBodyBytes
         self.maxCapturedResponseBodyBytes = maxCapturedResponseBodyBytes
+    }
+
+    /// True when the host is covered by `productionHostPatterns`.
+    ///
+    /// A `nil` host is treated as non-production: it means a malformed URL,
+    /// and blocking on it would be confusing without protecting anything.
+    public func isProductionHost(_ host: String?) -> Bool {
+        guard let host = host?.lowercased(), !host.isEmpty else { return false }
+        for raw in productionHostPatterns {
+            var pattern = raw.lowercased()
+            if pattern.hasPrefix("*.") { pattern.removeFirst(2) }
+            guard !pattern.isEmpty else { continue }
+            if host == pattern || host.hasSuffix("." + pattern) { return true }
+        }
+        return false
     }
 
     /// REST defaults.
