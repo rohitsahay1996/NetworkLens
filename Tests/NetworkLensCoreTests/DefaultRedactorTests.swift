@@ -101,6 +101,30 @@ final class DefaultRedactorTests: XCTestCase {
         XCTAssertFalse(redactor.matches(key: "discard_reason"))
     }
 
+    /// Echo and debug endpoints reflect request headers back inside the
+    /// response body. Header names must therefore be sensitive as body keys.
+    func testDenylistedHeaderNamesAreSensitiveAsBodyKeys() {
+        XCTAssertTrue(redactor.matches(key: "authorization"))
+        XCTAssertTrue(redactor.matches(key: "Authorization"))
+        XCTAssertTrue(redactor.matches(key: "x-api-key"))
+        XCTAssertTrue(redactor.matches(key: "set-cookie"))
+    }
+
+    func testRedactsReflectedHeadersInResponseBody() {
+        let snapshot = ResponseSnapshot(
+            statusCode: 200,
+            headers: ["Content-Type": "application/json"],
+            body: Data(#"""
+            {"headers":{"authorization":"Bearer jwt","x-api-key":"k1","accept":"*/*"},"ok":true}
+            """#.utf8)
+        )
+        let output = String(data: redactor.redact(snapshot).body!, encoding: .utf8)!
+        XCTAssertEqual(
+            output,
+            #"{"headers":{"authorization":"<redacted>","x-api-key":"<redacted>","accept":"*/*"},"ok":true}"#
+        )
+    }
+
     func testMatchesCamelSnakeAndDigitBoundaries() {
         XCTAssertTrue(redactor.matches(key: "cardNumber"))
         XCTAssertTrue(redactor.matches(key: "card_holder"))

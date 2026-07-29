@@ -62,6 +62,12 @@ public struct DefaultRedactor: Redactor {
     /// than exact match so `cardholder` and `tokenExpiry` are covered too —
     /// a false positive costs a hidden field, a false negative leaks a PAN.
     public func matches(key: String) -> Bool {
+        // Denylisted header names count as sensitive body keys too. Debug and
+        // echo endpoints reflect request headers back inside the response body,
+        // so `{"headers":{"authorization":"Bearer …"}}` would otherwise put an
+        // auth header on disk through the back door.
+        if headerNames.contains(key.lowercased()) { return true }
+
         for token in Self.tokenize(key) where bodyKeyTerms.contains(where: token.hasPrefix) {
             return true
         }
