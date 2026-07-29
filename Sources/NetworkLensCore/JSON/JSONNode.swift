@@ -7,7 +7,7 @@ import Foundation
 /// parses numbers into `NSNumber`, which turns `1.0` into `1` and rounds large
 /// integers. Milestone 2 edits this tree and writes it back, so number literals
 /// are kept as their original source text and object entries stay an array.
-public indirect enum JSONNode: Sendable, Hashable {
+public indirect enum JSONNode: Sendable, Hashable, Codable {
     case object([Entry])
     case array([JSONNode])
     case string(String)
@@ -27,6 +27,29 @@ public indirect enum JSONNode: Sendable, Hashable {
             self.key = key
             self.value = value
         }
+    }
+}
+
+// MARK: - Codable
+
+extension JSONNode {
+
+    /// Encoded as its JSON source text in a single value container.
+    ///
+    /// The synthesised enum encoding would work, but it would bury a payload
+    /// inside `{"object":{"_0":[…]}}` wrappers in every trace file and bug
+    /// report. Round-tripping through the lossless parser and serializer keeps
+    /// ordering and number literals and stays readable to a human opening the
+    /// file in an editor.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let text = try container.decode(String.self)
+        self = try JSONNodeParser.parse(text)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(JSONNodeSerializer.string(from: self))
     }
 }
 
