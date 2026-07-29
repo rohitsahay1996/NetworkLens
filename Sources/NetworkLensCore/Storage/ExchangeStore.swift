@@ -54,6 +54,27 @@ public final class ExchangeStore: @unchecked Sendable {
         notify()
     }
 
+    /// Appends, or replaces in place if an exchange with this id is already
+    /// held.
+    ///
+    /// Interception records an exchange in flight so the overlay shows the row
+    /// while it is pending, then records it again on completion. Appending
+    /// twice would double-count; replacing keeps the row where the user last
+    /// saw it rather than jumping it to the top.
+    public func upsert(_ exchange: NetworkExchange) {
+        lock.lock()
+        if let index = storage.firstIndex(where: { $0.id == exchange.id }) {
+            storage[index] = exchange
+        } else {
+            storage.append(exchange)
+            if storage.count > capacity {
+                storage.removeFirst(storage.count - capacity)
+            }
+        }
+        lock.unlock()
+        notify()
+    }
+
     /// Replaces an exchange in place, keeping its position in the buffer.
     ///
     /// Used when a response lands for a request recorded earlier. A no-op if

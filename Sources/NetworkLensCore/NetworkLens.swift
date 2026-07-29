@@ -18,14 +18,34 @@ public enum NetworkLens {
     /// do not re-swizzle.
     public static func start(configuration: LensConfiguration = .default) {
         state.activate(with: configuration)
-        // Interception install lands in the next commit, gated on API sign-off.
+
+        if !configuration.keepBreakpointsAcrossLaunches {
+            Breakpoints.shared.clearForRelaunch()
+        }
+
+        // Covers URLSession.shared, which honours globally registered
+        // protocols but has a configuration the app cannot reach.
+        URLProtocol.registerClass(LensURLProtocol.self)
+
+        // Covers sessions built after this point from .default / .ephemeral.
+        LensSwizzler.installConfigurationHooks()
+
+        if configuration.automaticScreenAttribution {
+            // Stamps the current screen onto the request on the caller's
+            // thread, at task creation. Reading it later in canInit would give
+            // the delegate queue's screen, which is nobody's screen.
+            LensSwizzler.installTaskHooks()
+        }
     }
 
     /// Explicit install, for apps that build their own session configuration
     /// and would rather not be swizzled.
     public static func install(into config: URLSessionConfiguration) {
-        // Interception install lands in the next commit, gated on API sign-off.
-        _ = config
+        var classes = config.protocolClasses ?? []
+        guard !classes.contains(where: { $0 == LensURLProtocol.self }) else { return }
+        // First, or the system HTTP protocol claims the request before we see it.
+        classes.insert(LensURLProtocol.self, at: 0)
+        config.protocolClasses = classes
     }
 
     /// Escape hatch for traffic `URLProtocol` cannot see — gRPC, raw sockets,
@@ -100,10 +120,13 @@ final class LensState: @unchecked Sendable {
     }
 
     /// Redacts on the way in. There is no path into the store that skips this.
+    ///
+    /// Upserts rather than appends, because interception records the same
+    /// exchange twice — once in flight, once complete.
     func record(_ exchange: NetworkExchange) {
         lock.lock()
         let redactor = _configuration.redactor
         lock.unlock()
-        store.record(exchange.redacted(by: redactor))
+        store.upsert(exchange.redacted(by: redactor))
     }
 }
