@@ -1,3 +1,10 @@
+//
+//  OverlayWindowController.swift
+//  NetworkLensUI
+//
+//  Created by Rohit Sahay on 30/07/26.
+//
+
 #if canImport(UIKit)
 import UIKit
 import SwiftUI
@@ -66,23 +73,38 @@ struct OverlayRootView: View {
         FloatingBubble(
             exchangeCount: lens.exchanges.count,
             hasArmedBreakpoints: lens.breakpoints.contains { $0.isEnabled },
-            isHolding: lens.presentation.isHolding
+            isHolding: lens.presentation.isHolding,
+            isMocking: lens.isServingMocks
         ) {
             isInspectorPresented = true
         }
         .onPreferenceChange(BubbleFrameKey.self, perform: onBubbleFrameChange)
+        // A view controller can only present one thing at a time, so the
+        // inspector has to get out of the way rather than compete. Dropping it
+        // is the right way round: the app is stopped behind the breakpoint, and
+        // the traffic list will still be there afterwards.
+        .onChange(of: lens.presentation.isHolding) { isHolding in
+            if isHolding { isInspectorPresented = false }
+        }
         .sheet(isPresented: $isInspectorPresented) {
             InspectorView()
                 .environmentObject(lens)
         }
-        // Driven by the coordinator rather than by a tap, and presented over
-        // the inspector: a breakpoint can fire while the tester is reading the
-        // traffic list, and it has to win — the app is stopped behind it.
-        .sheet(isPresented: .constant(lens.presentation.isHolding)) {
-            BreakpointSheet(presentation: lens.presentation)
-                .environmentObject(lens)
-                .interactiveDismissDisabled()
-        }
+        // On its own host view, not a second `.sheet` on the bubble. SwiftUI
+        // honours one presentation per view and silently drops the rest, so
+        // stacking both here left whichever lost the race unable to present —
+        // a breakpoint that holds the app behind a sheet nobody can see.
+        .background(
+            Color.clear
+                // Driven by the coordinator rather than by a tap: a breakpoint
+                // can fire while the tester is reading the traffic list, and it
+                // has to win — the app is stopped behind it.
+                .sheet(isPresented: .constant(lens.presentation.isHolding)) {
+                    BreakpointSheet()
+                        .environmentObject(lens)
+                        .interactiveDismissDisabled()
+                }
+        )
     }
 }
 

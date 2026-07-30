@@ -1,3 +1,10 @@
+//
+//  BreakpointSheet.swift
+//  NetworkLensUI
+//
+//  Created by Rohit Sahay on 30/07/26.
+//
+
 #if canImport(UIKit)
 import SwiftUI
 import NetworkLensCore
@@ -11,9 +18,15 @@ import NetworkLensCore
 /// than no editor at all.
 struct BreakpointSheet: View {
 
-    let presentation: BreakpointPresentation
-
     @EnvironmentObject private var lens: LensObservable
+
+    /// Read live rather than captured at presentation time. Sheet content is
+    /// built once and not necessarily rebuilt when the held item changes, so a
+    /// captured snapshot goes stale the moment the queue advances — and every
+    /// button here resolves *by id*. `resolve` on a stale id matches no
+    /// continuation and returns silently, leaving the app held with nothing on
+    /// screen still able to release it.
+    private var presentation: BreakpointPresentation { lens.presentation }
     @State private var bodyText = ""
     @State private var statusCode = ""
     @State private var loadedFor: UUID?
@@ -31,6 +44,10 @@ struct BreakpointSheet: View {
                         LabelledRow(label: "Queue", value: queue)
                     }
                     countdown
+                } footer: {
+                    if !presentation.isAutoResumeEnabled {
+                        Text("The app's own request timeout keeps running and is not extended. Held past it, the request fails with a timeout — which is the app's real behaviour, not the tool's.")
+                    }
                 }
 
                 if presentation.stage == .response {
@@ -101,16 +118,42 @@ struct BreakpointSheet: View {
 
     @ViewBuilder
     private var countdown: some View {
-        if let deadline = presentation.autoResumeAt {
-            let remaining = max(0, deadline.timeIntervalSince(now))
-            HStack {
-                Image(systemName: "clock")
-                Text("Auto-resumes in \(Int(remaining.rounded()))s")
-                Spacer()
+        Toggle(isOn: autoResumeBinding) {
+            HStack(spacing: 6) {
+                Image(systemName: presentation.isAutoResumeEnabled ? "clock" : "clock.badge.xmark")
+                Text(countdownLabel)
             }
             .font(.subheadline)
-            .foregroundStyle(remaining < 5 ? Color.red : .secondary)
+            .foregroundStyle(countdownTint)
         }
+    }
+
+    private var countdownLabel: String {
+        guard presentation.isAutoResumeEnabled, let deadline = presentation.autoResumeAt else {
+            // No countdown to show, so the row says what is now true instead:
+            // nothing here will let go of the request on its own.
+            return "Auto-resume off"
+        }
+        return "Auto-resumes in \(Int(max(0, deadline.timeIntervalSince(now)).rounded()))s"
+    }
+
+    private var countdownTint: Color {
+        guard presentation.isAutoResumeEnabled, let deadline = presentation.autoResumeAt else {
+            return .secondary
+        }
+        return deadline.timeIntervalSince(now) < 5 ? .red : .secondary
+    }
+
+    /// Writes straight through to the coordinator; the flag lives on the held
+    /// item, not in this view, so a re-presented sheet shows the real state.
+    private var autoResumeBinding: Binding<Bool> {
+        Binding(
+            get: { presentation.isAutoResumeEnabled },
+            set: { enabled in
+                guard let id = presentation.id else { return }
+                Task { await BreakpointCoordinator.shared.setAutoResumeEnabled(enabled, for: id) }
+            }
+        )
     }
 
     // MARK: - Loading

@@ -1,3 +1,10 @@
+//
+//  BreakpointListView.swift
+//  NetworkLensUI
+//
+//  Created by Rohit Sahay on 30/07/26.
+//
+
 #if canImport(UIKit)
 import SwiftUI
 import NetworkLensCore
@@ -30,22 +37,39 @@ struct BreakpointListView: View {
             if !lens.perturbations.isEmpty {
                 Section {
                     ForEach(lens.perturbations) { perturbation in
-                        VStack(alignment: .leading, spacing: 3) {
-                            HStack {
-                                Text(perturbation.name).font(.subheadline.weight(.medium))
-                                if perturbation.qaVerified {
-                                    Image(systemName: "checkmark.seal.fill")
-                                        .font(.caption2)
-                                        .foregroundStyle(.green)
+                        HStack(alignment: .top) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack {
+                                    Text(perturbation.name).font(.subheadline.weight(.medium))
+                                    if perturbation.qaVerified {
+                                        Image(systemName: "checkmark.seal.fill")
+                                            .font(.caption2)
+                                            .foregroundStyle(.green)
+                                    }
                                 }
+                                Text(perturbation.endpointKey)
+                                    .font(.system(.caption2, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                Text("\(perturbation.ops.count) op\(perturbation.ops.count == 1 ? "" : "s")")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
                             }
-                            Text(perturbation.endpointKey)
-                                .font(.system(.caption2, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                            Text("\(perturbation.ops.count) op\(perturbation.ops.count == 1 ? "" : "s")")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
+
+                            Spacer(minLength: 8)
+
+                            // Arming one is what makes it rewrite traffic. Until
+                            // this exists a saved perturbation is a note to self.
+                            Toggle("", isOn: Binding(
+                                get: { perturbation.isEnabled },
+                                set: { newValue in
+                                    var edited = perturbation
+                                    edited.isEnabled = newValue
+                                    Breakpoints.shared.save(edited)
+                                }
+                            ))
+                            .labelsHidden()
                         }
+                        .opacity(perturbation.isEnabled ? 1 : 0.5)
                     }
                     .onDelete { offsets in
                         for index in offsets {
@@ -55,7 +79,7 @@ struct BreakpointListView: View {
                 } header: {
                     Text("Saved perturbations")
                 } footer: {
-                    Text("Stored as edits rather than as whole payloads, so they keep meaning the same thing after the server adds a field.")
+                    Text("Armed perturbations rewrite matching responses with nobody watching — no breakpoint needed. Stored as edits rather than whole payloads, so they keep meaning the same thing after the server adds a field.")
                 }
             }
         }

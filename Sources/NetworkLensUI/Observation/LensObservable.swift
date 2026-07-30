@@ -1,3 +1,10 @@
+//
+//  LensObservable.swift
+//  NetworkLensUI
+//
+//  Created by Rohit Sahay on 30/07/26.
+//
+
 import Foundation
 import Combine
 import NetworkLensCore
@@ -26,6 +33,7 @@ public final class LensObservable: ObservableObject {
     private var storeToken: ExchangeStore.ObservationToken?
     private var breakpointToken: Breakpoints.ObservationToken?
     private var mocksToken: Mocks.ObservationToken?
+    private var hangToken: HangingRequests.ObservationToken?
 
     public init() {
         storeToken = NetworkLens.store.addObserver { [weak self] in
@@ -37,6 +45,9 @@ public final class LensObservable: ObservableObject {
         mocksToken = Mocks.shared.addObserver { [weak self] in
             Task { @MainActor [weak self] in self?.revision &+= 1 }
         }
+        hangToken = HangingRequests.shared.addObserver { [weak self] in
+            Task { @MainActor [weak self] in self?.revision &+= 1 }
+        }
         Task { await self.attachToCoordinator() }
     }
 
@@ -44,6 +55,7 @@ public final class LensObservable: ObservableObject {
         await BreakpointCoordinator.shared.setStateObserver { [weak self] state in
             Task { @MainActor [weak self] in
                 self?.presentation = BreakpointPresentation(state: state)
+                self?.heldByExchangeID = state.heldByExchangeID
             }
         }
     }
@@ -84,6 +96,96 @@ public final class LensObservable: ObservableObject {
     public var isMockingEnabled: Bool {
         _ = revision
         return Mocks.shared.isMockingEnabled
+    }
+
+    /// Something is actually being served, as opposed to armed-but-suspended.
+    public var isServingMocks: Bool {
+        _ = revision
+        return Mocks.shared.isServing
+    }
+
+    public func isServingMock(for exchange: NetworkExchange) -> Bool {
+        _ = revision
+        return Mocks.shared.isServing(endpointKey: exchange.endpointKey)
+    }
+
+    /// Flips one endpoint between its mock and the real server, from wherever
+    /// the tester is looking at the response.
+    public func setMockServing(_ serving: Bool, for exchange: NetworkExchange) {
+        guard var rule = Mocks.shared.rule(forEndpointKey: exchange.endpointKey) else { return }
+        rule.isEnabled = serving
+        Mocks.shared.set(rule)
+        // A per-endpoint switch that silently does nothing because the master
+        // switch is off is worse than no switch. Turning one on turns mocking
+        // on; turning one off leaves every other rule alone.
+        if serving, !Mocks.shared.isMockingEnabled {
+            Mocks.shared.setMockingEnabled(true)
+        }
+    }
+
+    // MARK: - Replay
+
+    public func canReplay(_ exchange: NetworkExchange) -> Bool {
+        _ = revision
+        return NetworkLens.canReplay(exchange)
+    }
+
+    /// Fires a captured request again. Fire-and-forget: the new exchange
+    /// arrives through the store like any other.
+    public func replay(_ exchange: NetworkExchange) {
+        Task { try? await NetworkLens.replay(exchange) }
+    }
+
+    /// Re-fires every replayable request a screen made, in the order it made
+    /// them.
+    ///
+    /// The unit that matters on a screen with four calls: replaying them one at
+    /// a time never reproduces the interleaving, and the interleaving is where
+    /// the races live.
+    public func replayScreen(_ screen: String) {
+        let group = exchanges
+            .filter { ($0.screen ?? "Unattributed") == screen && NetworkLens.canReplay($0) }
+            .reversed()
+
+        Task {
+            for exchange in group {
+                try? await NetworkLens.replay(exchange)
+            }
+        }
+    }
+
+    /// The rule answering this endpoint, if any.
+    public func rule(for exchange: NetworkExchange) -> MockRule? {
+        _ = revision
+        return Mocks.shared.rule(forEndpointKey: exchange.endpointKey)
+    }
+
+    /// Switches which named answer an endpoint gives.
+    public func activateVariant(_ variant: MockVariant, in rule: MockRule) {
+        Mocks.shared.activateVariant(variant.id, forRuleID: rule.id)
+        if !Mocks.shared.isMockingEnabled { Mocks.shared.setMockingEnabled(true) }
+    }
+
+    /// Adds a named answer to an endpoint, creating the rule if it is the
+    /// first one.
+    ///
+    /// Named by the tester, not by the tool. A generated set of "empty / 500 /
+    /// 401" reads well in a demo and badly in practice: the interesting states
+    /// are the ones this particular screen gets wrong, and only the person
+    /// debugging it knows what those are.
+    @discardableResult
+    public func addVariant(_ variant: MockVariant, for exchange: NetworkExchange) -> MockRule {
+        if var existing = Mocks.shared.rule(forEndpointKey: exchange.endpointKey) {
+            existing.addVariant(variant)
+            Mocks.shared.set(existing)
+            if !Mocks.shared.isMockingEnabled { Mocks.shared.setMockingEnabled(true) }
+            return existing
+        }
+
+        let rule = MockRule(endpointKey: exchange.endpointKey, variants: [variant])
+        Mocks.shared.set(rule)
+        if !Mocks.shared.isMockingEnabled { Mocks.shared.setMockingEnabled(true) }
+        return rule
     }
 
     /// Hit counts are read on demand rather than published: `Mocks.resolve`
@@ -131,6 +233,45 @@ public final class LensObservable: ObservableObject {
     public func clear() {
         NetworkLens.store.removeAll()
     }
+
+    // MARK: - Holds
+
+    /// Every request currently stopped at a breakpoint, keyed by exchange id.
+    /// Includes queued holds, which have no sheet of their own and would
+    /// otherwise be indistinguishable from a slow request.
+    @Published public private(set) var heldByExchangeID: [UUID: UUID] = [:]
+
+    public func isHeld(_ exchange: NetworkExchange) -> Bool {
+        heldByExchangeID[exchange.id] != nil
+    }
+
+    /// Parked by a `.hang` mock, waiting to be let through.
+    public func isHanging(_ exchange: NetworkExchange) -> Bool {
+        _ = revision
+        return HangingRequests.shared.isHanging(exchange.id)
+    }
+
+    public var hasHangingRequests: Bool {
+        _ = revision
+        return !HangingRequests.shared.hanging.isEmpty
+    }
+
+    /// Lets a parked request continue to the network, ending the loading state
+    /// without waiting out the app's timeout.
+    public func releaseHang(_ exchange: NetworkExchange) {
+        HangingRequests.shared.release(exchange.id)
+    }
+
+    public func releaseAllHangs() {
+        HangingRequests.shared.releaseAll()
+    }
+
+    /// Releases a held request from wherever the tester found it — the traffic
+    /// row, the detail screen — carrying any edits already staged in the sheet.
+    public func resume(_ exchange: NetworkExchange) {
+        guard let pendingID = heldByExchangeID[exchange.id] else { return }
+        Task { await BreakpointCoordinator.shared.resume(id: pendingID) }
+    }
 }
 
 /// Main-actor snapshot of the coordinator's queue.
@@ -144,6 +285,7 @@ public struct BreakpointPresentation: Equatable {
     public var pausedAt: Date?
     public var position: Int
     public var total: Int
+    public var isAutoResumeEnabled: Bool
 
     public static let empty = BreakpointPresentation(
         id: nil, endpointKey: "", stage: .response, payload: nil,
@@ -163,13 +305,15 @@ public struct BreakpointPresentation: Equatable {
         pausedAt = presented.pausedAt
         position = state.position
         total = state.total
+        isAutoResumeEnabled = presented.isAutoResumeEnabled
     }
 
     public init(
         id: UUID?, endpointKey: String, stage: EditRecord.Stage,
         payload: BreakpointPayload?, autoResumeAt: Date?, pausedAt: Date?,
-        position: Int, total: Int
+        position: Int, total: Int, isAutoResumeEnabled: Bool = true
     ) {
+        self.isAutoResumeEnabled = isAutoResumeEnabled
         self.id = id
         self.endpointKey = endpointKey
         self.stage = stage

@@ -1,3 +1,10 @@
+//
+//  PassthroughWindow.swift
+//  NetworkLensUI
+//
+//  Created by Rohit Sahay on 30/07/26.
+//
+
 #if canImport(UIKit)
 import UIKit
 import SwiftUI
@@ -45,8 +52,15 @@ final class OverlayHostingController<Content: View>: UIHostingController<Content
 /// Carries the bubble's on-screen frame up to the window.
 struct BubbleFrameKey: PreferenceKey {
     static var defaultValue: CGRect = .zero
+
+    /// Only one view reports a real frame; every other node in the subtree
+    /// contributes `defaultValue`. Taking `nextValue()` unconditionally lets
+    /// one of those defaults land last and erase the measurement, which reads
+    /// as a bubble that draws but takes no touches.
     static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
-        value = nextValue()
+        let next = nextValue()
+        guard !next.isEmpty else { return }
+        value = next
     }
 }
 #endif

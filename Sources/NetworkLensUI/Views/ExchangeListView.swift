@@ -1,3 +1,10 @@
+//
+//  ExchangeListView.swift
+//  NetworkLensUI
+//
+//  Created by Rohit Sahay on 30/07/26.
+//
+
 #if canImport(UIKit)
 import SwiftUI
 import NetworkLensCore
@@ -13,8 +20,23 @@ struct ExchangeListView: View {
         List {
             if groupsByScreen {
                 ForEach(groupedResults, id: \.screen) { group in
-                    Section(group.screen) {
+                    Section {
                         ForEach(group.exchanges) { row($0) }
+                    } header: {
+                        HStack {
+                            Text(group.screen)
+                            Spacer()
+                            // Re-fires the screen's calls together, which is
+                            // the only way to reproduce their interleaving.
+                            Button {
+                                lens.replayScreen(group.screen)
+                            } label: {
+                                Label("Replay all", systemImage: "arrow.clockwise")
+                                    .font(.caption2)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Color.accentColor)
+                        }
                     }
                 }
             } else {
@@ -45,6 +67,20 @@ struct ExchangeListView: View {
                 }
                 .accessibilityLabel("Group by screen")
             }
+            // A screen's calls park together, so releasing them one at a time
+            // means the screen never reaches its loaded state all at once.
+            //
+            // The condition lives inside the item rather than around it:
+            // `if` between toolbar items is iOS 16, and this package supports 15.
+            ToolbarItem(placement: .navigationBarTrailing) {
+                if lens.hasHangingRequests {
+                    Button {
+                        lens.releaseAllHangs()
+                    } label: {
+                        Label("Load all", systemImage: "play.circle.fill")
+                    }
+                }
+            }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button("Clear") { lens.clear() }
                     .disabled(lens.exchanges.isEmpty)
@@ -58,7 +94,44 @@ struct ExchangeListView: View {
             ExchangeDetailView(exchange: exchange)
                 .environmentObject(lens)
         } label: {
-            ExchangeRow(exchange: exchange)
+            ExchangeRow(
+                exchange: exchange,
+                isHeld: lens.isHeld(exchange),
+                isHanging: lens.isHanging(exchange),
+                // Only while mocks are serving. With nothing armed, every row is
+                // live and a LIVE badge on all of them is noise; once something
+                // is faked, the distinction is the most important thing on screen.
+                showsLiveBadge: lens.isServingMocks
+            )
+        }
+        // Releasing a hold has to be reachable from the list, not only from the
+        // breakpoint sheet. Queued holds never get a sheet at all, and a row
+        // stopped with no way to start it reads as the tool having hung the app.
+        .swipeActions(edge: .leading) {
+            if lens.isHeld(exchange) {
+                Button {
+                    lens.resume(exchange)
+                } label: {
+                    Label("Resume", systemImage: "play.fill")
+                }
+                .tint(.green)
+            }
+            if lens.isHanging(exchange) {
+                Button {
+                    lens.releaseHang(exchange)
+                } label: {
+                    Label("Load", systemImage: "play.circle.fill")
+                }
+                .tint(.green)
+            }
+            if lens.canReplay(exchange) {
+                Button {
+                    lens.replay(exchange)
+                } label: {
+                    Label("Replay", systemImage: "arrow.clockwise")
+                }
+                .tint(.blue)
+            }
         }
     }
 
@@ -88,11 +161,35 @@ struct ExchangeListView: View {
 struct ExchangeRow: View {
 
     let exchange: NetworkExchange
+    /// Stopped at a breakpoint rather than merely slow. Without this the two
+    /// look identical — a spinner — and the held one never ends.
+    var isHeld = false
+    /// Parked by a hang mock. Distinct from held: nobody is editing it, it is
+    /// deliberately sitting in the loading state until someone lets it go.
+    var isHanging = false
+    /// Badge live rows too, so "no badge" stops meaning "probably real".
+    var showsLiveBadge = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
-                StatusPill(exchange: exchange)
+                if isHeld {
+                    Label("HELD", systemImage: "pause.fill")
+                        .font(.caption2.bold())
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.orange.opacity(0.18)))
+                        .foregroundStyle(Color.orange)
+                } else if isHanging {
+                    Label("LOADING", systemImage: "hourglass")
+                        .font(.caption2.bold())
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.purple.opacity(0.18)))
+                        .foregroundStyle(Color.purple)
+                } else {
+                    StatusPill(exchange: exchange)
+                }
                 Text(exchange.endpointKey)
                     .font(.subheadline.weight(.medium))
                     .lineLimit(1)
@@ -105,8 +202,15 @@ struct ExchangeRow: View {
             }
 
             HStack(spacing: 6) {
-                if exchange.source.isSynthetic {
+                if exchange.source.isSynthetic || showsLiveBadge {
                     SourceBadge(source: exchange.source)
+                }
+                // Says the tool fired it, not the app — worth knowing on a
+                // screen where some rows are real traffic and some are repeats.
+                if exchange.isReplay {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.caption2)
+                        .foregroundStyle(.blue)
                 }
                 if let screen = exchange.screen {
                     Text(screen)

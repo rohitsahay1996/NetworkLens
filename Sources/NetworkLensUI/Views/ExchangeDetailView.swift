@@ -1,3 +1,10 @@
+//
+//  ExchangeDetailView.swift
+//  NetworkLensUI
+//
+//  Created by Rohit Sahay on 30/07/26.
+//
+
 #if canImport(UIKit)
 import SwiftUI
 import NetworkLensCore
@@ -10,14 +17,154 @@ struct ExchangeDetailView: View {
 
     @EnvironmentObject private var lens: LensObservable
     @State private var confirmation: String?
+    @State private var isMockEditorPresented = false
+    @State private var editorMode: MockFromExchangeSheet.Mode = .add
+
+    /// Only the two payloads start open. Everything else is a question asked
+    /// about them, and a detail screen that opens fully expanded buries the
+    /// bodies under metadata — which is the state this screen is read in.
+    @State private var expanded: Set<String> = ["Request", "Response"]
 
     var body: some View {
         List {
-            Section("Exchange") {
+            // The app is waiting on this one, so it outranks even the payload.
+            if lens.isHeld(exchange) {
+                Section {
+                    Button {
+                        lens.resume(exchange)
+                        confirmation = "Resumed"
+                    } label: {
+                        Label("Resume this request", systemImage: "play.fill")
+                    }
+                }
+            }
+
+            // The way out of a loading state you asked for. Without it the only
+            // exits are the app's timeout and killing the app.
+            if lens.isHanging(exchange) {
+                Section {
+                    Button {
+                        lens.releaseHang(exchange)
+                        confirmation = "Loading — going to the network"
+                    } label: {
+                        Label("Load it now", systemImage: "play.circle.fill")
+                    }
+                } footer: {
+                    Text("Resumes the real request from where it was parked, so the loaded state is the server's data rather than something the tool made up.")
+                }
+            }
+
+            CollapsibleSection(id: "Actions", title: "Actions", expanded: $expanded) {
+                // The switch belongs here, next to the response it changes —
+                // not only in the Mocks tab, which is a list of rules rather
+                // than of what the app is currently being told.
+                if isEndpointMocked {
+                    Toggle(isOn: Binding(
+                        get: { lens.isServingMock(for: exchange) },
+                        set: { lens.setMockServing($0, for: exchange) }
+                    )) {
+                        Label(
+                            lens.isServingMock(for: exchange) ? "Serving mock" : "Serving live",
+                            systemImage: lens.isServingMock(for: exchange)
+                                ? "square.on.square" : "antenna.radiowaves.left.and.right"
+                        )
+                    }
+                }
+
+                // The switcher, inline rather than behind a sheet: flipping
+                // between empty, failed and loaded is the loop this whole
+                // feature exists to make fast, so it costs one tap from the
+                // response you are looking at.
+                if let rule = lens.rule(for: exchange), rule.variants.count > 1 {
+                    Picker(
+                        "Variant",
+                        selection: Binding(
+                            get: { rule.activeVariantID },
+                            set: { id in
+                                guard let variant = rule.variants.first(where: { $0.id == id })
+                                else { return }
+                                lens.activateVariant(variant, in: rule)
+                            }
+                        )
+                    ) {
+                        ForEach(rule.variants) { variant in
+                            Text(variant.name).tag(variant.id)
+                        }
+                    }
+                }
+
+                // First action: with a variant switched, this is the whole
+                // loop — and it is the one that used to require leaving the
+                // screen and coming back.
+                Button {
+                    lens.replay(exchange)
+                    confirmation = "Replaying \(exchange.endpointKey)"
+                } label: {
+                    Label("Replay this request", systemImage: "arrow.clockwise")
+                }
+                .disabled(!lens.canReplay(exchange))
+
+                Button {
+                    editorMode = .add
+                    isMockEditorPresented = true
+                } label: {
+                    Label("Add a mock…", systemImage: "plus.square.on.square")
+                }
+                .disabled(exchange.response == nil)
+
+                if isEndpointMocked {
+                    Button {
+                        editorMode = .edit
+                        isMockEditorPresented = true
+                    } label: {
+                        Label("Edit the active mock", systemImage: "square.on.square")
+                    }
+                }
+
+                // The one-tap version of the loading state, because that is how
+                // it is nearly always wanted: pin this endpoint open and go
+                // look at what the screen does.
+                Button {
+                    Mocks.shared.set(
+                        MockRule(
+                            endpointKey: exchange.endpointKey,
+                            steps: [.hang],
+                            name: "stuck loading"
+                        )
+                    )
+                    if !Mocks.shared.isMockingEnabled { Mocks.shared.setMockingEnabled(true) }
+                    confirmation = "\(exchange.endpointKey) will stay loading"
+                } label: {
+                    Label("Keep this endpoint loading", systemImage: "hourglass")
+                }
+
+                Button {
+                    Breakpoints.shared.set(
+                        Breakpoint(endpointKey: exchange.endpointKey, stage: .response)
+                    )
+                    confirmation = "Breakpoint armed on \(exchange.endpointKey)"
+                } label: {
+                    Label("Break on this endpoint", systemImage: "pause.circle")
+                }
+                .disabled(isBreakpointArmed)
+            }
+
+            CollapsibleSection(id: "Exchange", title: "Exchange", expanded: $expanded) {
                 LabelledRow(label: "Endpoint", value: exchange.endpointKey, monospaced: true)
                 LabelledRow(label: "Method", value: exchange.request.method)
                 LabelledRow(label: "Screen", value: exchange.screen ?? "—")
                 LabelledRow(label: "Source", value: exchange.source.label)
+                // Says the *endpoint* is mocked from now on, which is a
+                // different claim from `Source` — that one says where these
+                // particular bytes came from, and a rule armed after the fact
+                // does not rewrite history.
+                if isEndpointMocked {
+                    HStack {
+                        Text("Mock rule").foregroundStyle(.secondary)
+                        Spacer()
+                        MockedBadge()
+                    }
+                }
                 LabelledRow(
                     label: "URL",
                     value: exchange.request.url.absoluteString,
@@ -31,41 +178,23 @@ struct ExchangeDetailView: View {
                 }
             }
 
-            Section("Actions") {
-                Button {
-                    if lens.mock(exchange) != nil {
-                        confirmation = "Mocked \(exchange.endpointKey)"
-                    } else {
-                        confirmation = "Nothing to mock — this exchange has no response"
-                    }
-                } label: {
-                    Label("Mock this response", systemImage: "square.on.square")
-                }
-                .disabled(exchange.response == nil)
-
-                Button {
-                    Breakpoints.shared.set(
-                        Breakpoint(endpointKey: exchange.endpointKey, stage: .response)
-                    )
-                    confirmation = "Breakpoint armed on \(exchange.endpointKey)"
-                } label: {
-                    Label("Break on this endpoint", systemImage: "pause.circle")
-                }
-                .disabled(isBreakpointArmed)
-            }
-
             if let timing = exchange.timing {
-                Section("Timing") { TimingBreakdown(timing: timing) }
+                CollapsibleSection(id: "Timing", title: "Timing", expanded: $expanded) {
+                    TimingBreakdown(timing: timing)
+                }
             }
 
-            Section("Request") {
-                if exchange.request.headers.isEmpty {
-                    Text("No headers").foregroundStyle(.secondary).font(.footnote)
-                } else {
+            if !exchange.request.headers.isEmpty {
+                CollapsibleSection(
+                    id: "RequestHeaders", title: "Request headers", expanded: $expanded
+                ) {
                     ForEach(exchange.request.headers.sorted(by: { $0.key < $1.key }), id: \.key) {
                         LabelledRow(label: $0.key, value: $0.value, monospaced: true)
                     }
                 }
+            }
+
+            CollapsibleSection(id: "Request", title: "Request", expanded: $expanded) {
                 BodyView(
                     data: exchange.request.body,
                     contentType: exchange.request.header("Content-Type"),
@@ -73,21 +202,18 @@ struct ExchangeDetailView: View {
                 )
             }
 
-            if let response = exchange.response {
-                Section("Response · \(response.statusCode)") {
+            if let response = exchange.response, !response.headers.isEmpty {
+                CollapsibleSection(
+                    id: "ResponseHeaders", title: "Response headers", expanded: $expanded
+                ) {
                     ForEach(response.headers.sorted(by: { $0.key < $1.key }), id: \.key) {
                         LabelledRow(label: $0.key, value: $0.value, monospaced: true)
                     }
-                    BodyView(
-                        data: response.body,
-                        contentType: response.mimeType ?? response.header("Content-Type"),
-                        truncated: response.bodyTruncated
-                    )
                 }
             }
 
             if !exchange.edits.isEmpty {
-                Section("Edits") {
+                CollapsibleSection(id: "Edits", title: "Edits", expanded: $expanded) {
                     ForEach(exchange.edits) { record in
                         VStack(alignment: .leading, spacing: 2) {
                             Text(record.perturbationName ?? record.stage.rawValue)
@@ -97,13 +223,34 @@ struct ExchangeDetailView: View {
                                     .font(.system(.caption2, design: .monospaced))
                                     .foregroundStyle(.secondary)
                             }
+                            // The edit still applied. This says the response no
+                            // longer looks like the one it was captured
+                            // against, so what it produced may not be what the
+                            // name promises.
+                            if record.shapeDrifted {
+                                Label(
+                                    "Response shape changed since this was saved",
+                                    systemImage: "exclamationmark.triangle.fill"
+                                )
+                                .font(.caption2)
+                                .foregroundStyle(.orange)
+                            }
                         }
                     }
                 }
             }
+
+            // Last, because it is the tall one: a large body in tree view fills
+            // the screen, and anything below it is reachable only by scrolling
+            // past the whole payload.
+            responseSection
         }
         .navigationTitle(exchange.endpointKey)
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $isMockEditorPresented) {
+            MockFromExchangeSheet(exchange: exchange, mode: editorMode)
+                .environmentObject(lens)
+        }
         .overlay(alignment: .bottom) {
             if let confirmation {
                 Text(confirmation)
@@ -121,8 +268,50 @@ struct ExchangeDetailView: View {
         }
     }
 
+    /// The payload, or an honest account of why there isn't one yet. An empty
+    /// top section would read as "the response was empty", which is a different
+    /// thing from in flight, held, or failed.
+    @ViewBuilder
+    private var responseSection: some View {
+        if let response = exchange.response {
+            CollapsibleSection(
+                id: "Response",
+                title: "Response · \(response.statusCode)",
+                expanded: $expanded
+            ) {
+                BodyView(
+                    data: response.body,
+                    contentType: response.mimeType ?? response.header("Content-Type"),
+                    truncated: response.bodyTruncated
+                )
+            }
+        } else if let failure = exchange.failure {
+            CollapsibleSection(id: "Response", title: "Response", expanded: $expanded) {
+                Label(
+                    "\(failure.kind.rawValue) — \(failure.message)",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .font(.footnote)
+                .foregroundStyle(.red)
+            }
+        } else {
+            CollapsibleSection(id: "Response", title: "Response", expanded: $expanded) {
+                Label(
+                    lens.isHeld(exchange) ? "Held at a breakpoint" : "In flight",
+                    systemImage: lens.isHeld(exchange) ? "pause.fill" : "clock"
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private var isBreakpointArmed: Bool {
         lens.breakpoints.contains { $0.endpointKey == exchange.endpointKey }
+    }
+
+    private var isEndpointMocked: Bool {
+        lens.mocks.contains { $0.endpointKey == exchange.endpointKey && $0.isEnabled }
     }
 }
 

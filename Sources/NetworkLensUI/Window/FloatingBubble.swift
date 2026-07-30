@@ -1,3 +1,10 @@
+//
+//  FloatingBubble.swift
+//  NetworkLensUI
+//
+//  Created by Rohit Sahay on 30/07/26.
+//
+
 #if canImport(UIKit)
 import SwiftUI
 
@@ -9,6 +16,11 @@ struct FloatingBubble: View {
     /// Tinted while a breakpoint is held, so the tester can see the app is
     /// paused rather than hung.
     let isHolding: Bool
+    /// Mocks are being served. Shown on the bubble because it is the only part
+    /// of the tool visible while someone is using the app itself, and "am I
+    /// looking at real data?" is a question that has to be answerable without
+    /// opening anything.
+    var isMocking = false
     let onTap: () -> Void
 
     static let size: CGFloat = 56
@@ -77,7 +89,7 @@ struct FloatingBubble: View {
                     .overlay(Circle().strokeBorder(tint.opacity(0.6), lineWidth: 2))
                     .shadow(radius: isDragging ? 12 : 4, y: 2)
 
-            Image(systemName: isHolding ? "pause.fill" : "antenna.radiowaves.left.and.right")
+            Image(systemName: icon)
                 .font(.system(size: 20, weight: .medium))
                 .foregroundStyle(tint)
         }
@@ -100,10 +112,22 @@ struct FloatingBubble: View {
         .accessibilityValue("\(exchangeCount) requests captured")
     }
 
+    private var icon: String {
+        if isHolding { return "pause.fill" }
+        if isMocking { return "square.on.square" }
+        return "antenna.radiowaves.left.and.right"
+    }
+
     /// Semantic colours only, so dark mode and high contrast come free.
+    ///
+    /// Mocking takes purple, which is what every badge in this UI already uses
+    /// for synthetic traffic; armed breakpoints move to indigo rather than share
+    /// it. Serving fake data outranks an armed-but-unfired breakpoint because it
+    /// is already changing what the tester sees.
     private var tint: Color {
         if isHolding { return .orange }
-        if hasArmedBreakpoints { return .purple }
+        if isMocking { return .purple }
+        if hasArmedBreakpoints { return .indigo }
         return .accentColor
     }
 }

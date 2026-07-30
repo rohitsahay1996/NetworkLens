@@ -1,3 +1,10 @@
+//
+//  MockListView.swift
+//  NetworkLensUI
+//
+//  Created by Rohit Sahay on 30/07/26.
+//
+
 #if canImport(UIKit)
 import SwiftUI
 import NetworkLensCore
@@ -84,6 +91,23 @@ struct MockRuleRow: View {
                 if let name = rule.name {
                     Text(name).font(.caption).foregroundStyle(.secondary)
                 }
+                if let summary = rule.match.summary {
+                    Text(summary)
+                        .font(.caption2)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.blue.opacity(0.15)))
+                        .foregroundStyle(.blue)
+                        .lineLimit(1)
+                }
+                if rule.variants.count > 1 {
+                    Text("1 of \(rule.variants.count)")
+                        .font(.caption2)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                        .foregroundStyle(.secondary)
+                }
                 Text(scriptSummary)
                     .font(.caption2)
                     .padding(.horizontal, 6)
@@ -122,15 +146,71 @@ struct MockRuleEditor: View {
             List {
                 Section("Rule") {
                     LabelledRow(label: "Endpoint", value: rule.endpointKey, monospaced: true)
-                    TextField("Name", text: Binding(
+                    if let summary = rule.match.summary {
+                        LabelledRow(label: "Only when", value: summary, monospaced: true)
+                    }
+                }
+
+                Section {
+                    ForEach(rule.variants) { variant in
+                        Button {
+                            rule.activate(variantID: variant.id)
+                        } label: {
+                            HStack {
+                                Image(
+                                    systemName: variant.id == rule.activeVariantID
+                                        ? "largecircle.fill.circle" : "circle"
+                                )
+                                .foregroundStyle(
+                                    variant.id == rule.activeVariantID ? Color.accentColor : .secondary
+                                )
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(variant.name)
+                                    Text(variant.steps.map(\.label).joined(separator: " → "))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .onDelete { offsets in
+                        for index in offsets { rule.removeVariant(id: rule.variants[index].id) }
+                    }
+
+                    TextField("Rename the selected variant", text: Binding(
                         get: { rule.name ?? "" },
                         set: { rule.name = $0.isEmpty ? nil : $0 }
                     ))
+
+                    Button {
+                        // Copies the one on screen rather than starting blank:
+                        // a new variant is nearly always "this, but with one
+                        // field changed".
+                        var copy = rule.activeVariant
+                        copy = MockVariant(
+                            name: "\(copy.name) copy",
+                            steps: copy.steps,
+                            exhaustion: copy.exhaustion,
+                            requestSample: copy.requestSample
+                        )
+                        rule.addVariant(copy)
+                    } label: {
+                        Label("Duplicate this variant", systemImage: "plus.square.on.square")
+                    }
+                } header: {
+                    Text("Variants")
+                } footer: {
+                    Text("One endpoint, several named answers, one active. The script below belongs to the selected variant — switching rewinds it to its first step.")
                 }
 
                 Section {
                     ForEach(Array(rule.steps.enumerated()), id: \.offset) { index, step in
-                        MockStepRow(index: index, step: step)
+                        MockStepRow(index: index, step: step) { delay in
+                            rule.steps[index] = step.settingDelay(delay)
+                        }
                     }
                     .onDelete { offsets in
                         rule.steps.remove(atOffsets: offsets)
@@ -146,13 +226,15 @@ struct MockRuleEditor: View {
                         ForEach(MockFailure.presets, id: \.errorCode) { preset in
                             Button(preset.label) { rule.steps.append(.fail(preset)) }
                         }
+                        Divider()
+                        Button("Never respond — stay loading") { rule.steps.append(.hang) }
                     } label: {
                         Label("Add step", systemImage: "plus.circle")
                     }
                 } header: {
                     Text("Script")
                 } footer: {
-                    Text("One step per request, in order. The bugs worth reproducing are sequences: fail then succeed, 200 then 401.")
+                    Text("One step per request, in order. The bugs worth reproducing are sequences: fail then succeed, 200 then 401. Tap a step's latency to throttle it — a mock that answers instantly hides every spinner and race the real call would expose.")
                 }
 
                 if rule.isScripted {
@@ -213,6 +295,8 @@ struct MockStepRow: View {
 
     let index: Int
     let step: MockOutcome
+    /// `nil` in read-only contexts; the editor passes a setter.
+    var setDelay: ((TimeInterval) -> Void)?
 
     var body: some View {
         HStack(spacing: 10) {
@@ -224,7 +308,7 @@ struct MockStepRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.subheadline)
-                if step.delay > 0 {
+                if setDelay == nil, step.delay > 0 {
                     Text("after \(formatDuration(step.delay))")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -233,16 +317,46 @@ struct MockStepRow: View {
 
             Spacer(minLength: 0)
 
-            Image(systemName: step.failure == nil ? "arrow.down.circle" : "bolt.horizontal.circle")
-                .foregroundStyle(step.failure == nil ? Color.green : Color.red)
+            // A hang is already unbounded waiting, so throttling it means
+            // nothing — offering the control would imply otherwise.
+            if let setDelay, !step.isHang {
+                Menu {
+                    ForEach(MockOutcome.delayPresets, id: \.self) { preset in
+                        Button(preset == 0 ? "No delay" : formatDuration(preset)) {
+                            setDelay(preset)
+                        }
+                    }
+                } label: {
+                    Label(
+                        step.delay > 0 ? formatDuration(step.delay) : "instant",
+                        systemImage: "timer"
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(step.delay > 0 ? Color.orange : .secondary)
+                }
+            }
+
+            Image(systemName: icon)
+                .foregroundStyle(tint)
         }
     }
 
     private var title: String {
+        if step.isHang { return "Never answers — stays loading" }
         if let failure = step.failure { return failure.label }
         guard let response = step.response else { return "—" }
         let size = response.body.isEmpty ? "empty" : formatBytes(response.body.count)
         return "HTTP \(response.statusCode) · \(size)"
+    }
+
+    private var icon: String {
+        if step.isHang { return "hourglass" }
+        return step.failure == nil ? "arrow.down.circle" : "bolt.horizontal.circle"
+    }
+
+    private var tint: Color {
+        if step.isHang { return .orange }
+        return step.failure == nil ? .green : .red
     }
 }
 #endif
