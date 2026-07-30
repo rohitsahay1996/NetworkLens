@@ -1,3 +1,10 @@
+//
+//  LensPersistence.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 30/07/26.
+//
+
 import Foundation
 
 /// Moves rules between the in-memory registries and a `LensSnapshotStore`.
@@ -39,9 +46,24 @@ public final class LensPersistence: @unchecked Sendable {
     // MARK: - Snapshotting
 
     /// Reads the live registries. Cheap enough to call on every mutation.
+    ///
+    /// Rules are redacted on the way out unless the host app opts out. A rule
+    /// is built from a real response and is therefore exactly as sensitive as
+    /// the traffic it came from — the traffic list has always been redacted,
+    /// but rules were not, and rules are the half that gets written to disk and
+    /// outlives the session. A captured `200` carrying a bearer token was being
+    /// shown as `***` and saved in the clear.
+    ///
+    /// In-memory rules are untouched, so the current session keeps serving the
+    /// real captured bytes; only the copy that persists is scrubbed.
     public func snapshot() -> LensSnapshot {
-        LensSnapshot(
-            mocks: Mocks.shared.all,
+        let configuration = NetworkLens.configuration
+        let mocks = configuration.redactsPersistedRules
+            ? Mocks.shared.all.map { $0.redacted(by: configuration.redactor) }
+            : Mocks.shared.all
+
+        return LensSnapshot(
+            mocks: mocks,
             breakpoints: Breakpoints.shared.all,
             perturbations: Breakpoints.shared.perturbations,
             isMockingEnabled: Mocks.shared.isMockingEnabled

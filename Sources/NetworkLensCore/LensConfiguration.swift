@@ -1,3 +1,10 @@
+//
+//  LensConfiguration.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// Everything the lens needs, supplied once at `start`.
@@ -50,6 +57,19 @@ public struct LensConfiguration: Sendable {
     /// something a debugging tool should start doing to a host app uninvited.
     public var persistsRules: Bool
 
+    /// Run saved rules through the redactor before writing them to disk.
+    ///
+    /// On by default, and the safe default is the right one: a rule captured
+    /// from a real response carries whatever that response carried, and
+    /// Application Support ends up in backups.
+    ///
+    /// The cost is real and worth stating — a mock whose token was scrubbed
+    /// will not satisfy an app that reads that token back, so a rule restored
+    /// after relaunch can behave differently from the one that was saved. Turn
+    /// this off deliberately when a rule's fidelity matters more than what
+    /// lands on disk.
+    public var redactsPersistedRules: Bool
+
     public init(
         matchers: [RequestMatcher] = [PathMatcher()],
         redactor: Redactor = DefaultRedactor(),
@@ -59,11 +79,13 @@ public struct LensConfiguration: Sendable {
         maxCapturedResponseBodyBytes: Int = 1_048_576,
         productionHostPatterns: [String] = [],
         keepBreakpointsAcrossLaunches: Bool = false,
-        persistsRules: Bool = false
+        persistsRules: Bool = false,
+        redactsPersistedRules: Bool = true
     ) {
         self.productionHostPatterns = productionHostPatterns
         self.keepBreakpointsAcrossLaunches = keepBreakpointsAcrossLaunches
         self.persistsRules = persistsRules
+        self.redactsPersistedRules = redactsPersistedRules
         self.matchers = matchers
         self.redactor = redactor
         self.maxStoredExchanges = maxStoredExchanges

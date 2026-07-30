@@ -1,3 +1,10 @@
+//
+//  NetworkLens.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// The public façade.
@@ -62,6 +69,32 @@ public enum NetworkLens {
         state.record(exchange)
     }
 
+    /// The clock everything in the lens waits on.
+    ///
+    /// A seam, not a setting. `LensURLProtocol` is instantiated by
+    /// `URLSession`, so there is nowhere to inject a clock into it — a static
+    /// is the only place it can be reached. Replace it in tests; leave it alone
+    /// in an app.
+    public static var clock: LensClock {
+        get { state.clock }
+        set { state.clock = newValue }
+    }
+
+    /// Attributes one request to a screen, explicitly.
+    ///
+    /// `ScreenContext` covers the ordinary case, where a screen is on display
+    /// and everything it fires belongs to it. This is for the case it cannot
+    /// serve: requests built on one thread and fired concurrently, where the
+    /// innermost pushed screen at task-creation time is whichever task happened
+    /// to get there first. Attribution then has to travel with the request
+    /// rather than with the caller.
+    ///
+    /// Takes precedence over `ScreenContext` — the swizzle only fills the
+    /// screen in when it is absent.
+    public static func tagged(_ request: URLRequest, screen: String) -> URLRequest {
+        request.stamped(screen: screen, exchangeID: UUID())
+    }
+
     // MARK: - Accessors used by the overlay
 
     /// Backing store. Exposed so `NetworkLensUI` can observe it without Core
@@ -96,8 +129,22 @@ final class LensState: @unchecked Sendable {
     private var _configuration = LensConfiguration.default
     private var _isActive = false
     private var _chain = MatcherChain([PathMatcher()])
+    private var _clock: LensClock = SystemClock()
 
     let store = ExchangeStore()
+
+    var clock: LensClock {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return _clock
+        }
+        set {
+            lock.lock()
+            _clock = newValue
+            lock.unlock()
+        }
+    }
 
     var configuration: LensConfiguration {
         lock.lock()
