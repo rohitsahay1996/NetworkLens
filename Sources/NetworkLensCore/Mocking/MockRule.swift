@@ -1,3 +1,10 @@
+//
+//  MockRule.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 30/07/26.
+//
+
 import Foundation
 
 /// A rule that answers matching traffic from the device, with no network leg.
@@ -5,6 +12,14 @@ import Foundation
 /// The unattended counterpart to a breakpoint. A breakpoint needs a human to
 /// resume it, which makes it useless for a UI test, a demo, or an endpoint that
 /// does not exist yet. A rule needs nobody.
+///
+/// A rule holds many named `variants` with exactly one active, and claims an
+/// endpoint either wholly or under `match` conditions.
+///
+/// Several rules may share an `endpointKey` when their conditions differ —
+/// `page=1` and `page=2` — but never ambiguously: `Mocks.resolve` picks the
+/// narrowest match, so the answer never depends on which rule was armed first.
+/// "Which of these is winning?" is not a question a debugging tool should pose.
 public struct MockRule: Codable, Sendable, Hashable, Identifiable {
 
     public let id: UUID
@@ -16,38 +31,66 @@ public struct MockRule: Codable, Sendable, Hashable, Identifiable {
 
     public var isEnabled: Bool
 
-    /// Played one per hit, in order. Never empty.
+    /// Extra conditions narrowing this rule to some of the endpoint's traffic.
     ///
-    /// A single-element script is the ordinary "always answer this" rule; the
-    /// list exists because the bugs worth reproducing are sequences — fail then
-    /// succeed, 200 then 401, empty then populated. Expressing those as one
-    /// rule keeps them reproducible; expressing them by hand-editing a rule
-    /// between taps does not.
-    public var steps: [MockOutcome]
+    /// `.any` — the default — is the old behaviour: one rule answers everything
+    /// the key matches. Identity is `endpointKey` *plus* this, so `page=1` and
+    /// `page=2` are two rules rather than one overwriting the other.
+    public var match: MockMatch
 
-    /// What happens after the last step. See `MockExhaustion`.
-    public var exhaustion: MockExhaustion
+    /// The library of answers for this endpoint. Never empty.
+    public private(set) var variants: [MockVariant]
 
-    /// Short label for the rule list and for bug reports: "empty cart",
-    /// "expired token".
-    public var name: String?
+    /// Which one is being served.
+    public private(set) var activeVariantID: UUID
 
+    public init(
+        id: UUID = UUID(),
+        endpointKey: String,
+        variants: [MockVariant],
+        activeVariantID: UUID? = nil,
+        isEnabled: Bool = true,
+        match: MockMatch = .any
+    ) {
+        self.id = id
+        self.endpointKey = endpointKey
+        self.match = match
+        let resolved = variants.isEmpty
+            ? [MockVariant(name: "default", steps: [.respond(MockResponse())])]
+            : variants
+        self.variants = resolved
+        // Falls back to the first rather than trusting the id: an active id
+        // naming a variant that is not here would serve nothing at all.
+        self.activeVariantID = resolved.contains { $0.id == activeVariantID }
+            ? activeVariantID! : resolved[0].id
+        self.isEnabled = isEnabled
+    }
+
+    /// A single script, unnamed. The shape most rules are still born in.
     public init(
         id: UUID = UUID(),
         endpointKey: String,
         steps: [MockOutcome],
         exhaustion: MockExhaustion = .repeatLast,
         isEnabled: Bool = true,
-        name: String? = nil
+        name: String? = nil,
+        requestSample: Data? = nil,
+        match: MockMatch = .any
     ) {
-        self.id = id
-        self.endpointKey = endpointKey
-        // An empty script would resolve to nothing on every hit, which reads as
-        // "the mock is broken". A rule that exists always answers something.
-        self.steps = steps.isEmpty ? [.respond(MockResponse())] : steps
-        self.exhaustion = exhaustion
-        self.isEnabled = isEnabled
-        self.name = name
+        self.init(
+            id: id,
+            endpointKey: endpointKey,
+            variants: [
+                MockVariant(
+                    name: name ?? "default",
+                    steps: steps,
+                    exhaustion: exhaustion,
+                    requestSample: requestSample
+                )
+            ],
+            isEnabled: isEnabled,
+            match: match
+        )
     }
 
     /// The common case: one canned response, served for every hit.
@@ -56,14 +99,18 @@ public struct MockRule: Codable, Sendable, Hashable, Identifiable {
         endpointKey: String,
         response: MockResponse,
         isEnabled: Bool = true,
-        name: String? = nil
+        name: String? = nil,
+        requestSample: Data? = nil,
+        match: MockMatch = .any
     ) {
         self.init(
             id: id,
             endpointKey: endpointKey,
             steps: [.respond(response)],
             isEnabled: isEnabled,
-            name: name
+            name: name,
+            requestSample: requestSample,
+            match: match
         )
     }
 
@@ -84,26 +131,135 @@ public struct MockRule: Codable, Sendable, Hashable, Identifiable {
         )
     }
 
-    public var isScripted: Bool { steps.count > 1 }
+    // MARK: - The active variant
+
+    /// Always present: `variants` is never empty and `activeVariantID` is
+    /// validated against it on every mutation.
+    public var activeVariant: MockVariant {
+        get { variants.first { $0.id == activeVariantID } ?? variants[0] }
+        set {
+            guard let index = variants.firstIndex(where: { $0.id == newValue.id }) else { return }
+            variants[index] = newValue
+        }
+    }
+
+    /// Reads and writes route to the active variant, so every caller written
+    /// against a single-answer rule keeps working unchanged.
+    public var steps: [MockOutcome] {
+        get { activeVariant.steps }
+        set { activeVariant.steps = newValue.isEmpty ? [.respond(MockResponse())] : newValue }
+    }
+
+    public var exhaustion: MockExhaustion {
+        get { activeVariant.exhaustion }
+        set { activeVariant.exhaustion = newValue }
+    }
+
+    public var name: String? {
+        get { activeVariant.name }
+        set { activeVariant.name = newValue?.isEmpty == false ? newValue! : "default" }
+    }
+
+    public var requestSample: Data? {
+        get { activeVariant.requestSample }
+        set { activeVariant.requestSample = newValue }
+    }
+
+    public var isScripted: Bool { activeVariant.isScripted }
 
     /// The outcome for a 1-based hit, or `nil` when the script is spent and the
     /// rule has agreed to stand down.
-    ///
-    /// Pure — the hit accounting lives in `Mocks`, so this stays testable and
-    /// can be called from a UI preview without moving a counter.
     public func outcome(forHit hit: Int) -> MockOutcome? {
-        guard hit >= 1, !steps.isEmpty else { return nil }
-        let index = hit - 1
-        if index < steps.count { return steps[index] }
+        activeVariant.outcome(forHit: hit)
+    }
 
-        switch exhaustion {
-        case .repeatLast:
-            return steps.last
-        case .loop:
-            return steps[index % steps.count]
-        case .passThrough:
-            return nil
+    /// Every variant, redacted. Used on the way to disk.
+    func redacted(by redactor: Redactor) -> MockRule {
+        var copy = self
+        copy.variants = variants.map { $0.redacted(by: redactor) }
+        return copy
+    }
+
+    // MARK: - Editing the library
+
+    /// Switches which answer is served. Unknown ids are ignored rather than
+    /// leaving the rule pointing at nothing.
+    public mutating func activate(variantID: UUID) {
+        guard variants.contains(where: { $0.id == variantID }) else { return }
+        activeVariantID = variantID
+    }
+
+    public mutating func addVariant(_ variant: MockVariant, activate: Bool = true) {
+        variants.append(variant)
+        if activate { activeVariantID = variant.id }
+    }
+
+    public mutating func updateVariant(_ variant: MockVariant) {
+        guard let index = variants.firstIndex(where: { $0.id == variant.id }) else { return }
+        variants[index] = variant
+    }
+
+    /// Removes a variant, refusing to remove the last one — a rule with no
+    /// answers would claim requests and serve nothing.
+    public mutating func removeVariant(id: UUID) {
+        guard variants.count > 1, let index = variants.firstIndex(where: { $0.id == id }) else {
+            return
         }
+        variants.remove(at: index)
+        if activeVariantID == id { activeVariantID = variants[0].id }
+    }
+
+    // MARK: - Codable
+
+    private enum CodingKeys: String, CodingKey {
+        case id, endpointKey, isEnabled, variants, activeVariantID, match
+        // Pre-variant shape, still on disk in anyone's saved rules.
+        case steps, exhaustion, name, requestSample
+    }
+
+    /// Reads both shapes. A rule saved before variants existed decodes into a
+    /// one-variant library rather than failing — a debugging tool that loses a
+    /// tester's saved rules on upgrade does not get used again.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let id = try container.decode(UUID.self, forKey: .id)
+        let endpointKey = try container.decode(String.self, forKey: .endpointKey)
+        let isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
+        let match = try container.decodeIfPresent(MockMatch.self, forKey: .match) ?? .any
+
+        if let variants = try container.decodeIfPresent([MockVariant].self, forKey: .variants) {
+            self.init(
+                id: id,
+                endpointKey: endpointKey,
+                variants: variants,
+                activeVariantID: try container.decodeIfPresent(UUID.self, forKey: .activeVariantID),
+                isEnabled: isEnabled,
+                match: match
+            )
+        } else {
+            self.init(
+                id: id,
+                endpointKey: endpointKey,
+                steps: try container.decodeIfPresent([MockOutcome].self, forKey: .steps) ?? [],
+                exhaustion: try container.decodeIfPresent(
+                    MockExhaustion.self, forKey: .exhaustion
+                ) ?? .repeatLast,
+                isEnabled: isEnabled,
+                name: try container.decodeIfPresent(String.self, forKey: .name),
+                requestSample: try container.decodeIfPresent(Data.self, forKey: .requestSample),
+                match: match
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(endpointKey, forKey: .endpointKey)
+        try container.encode(isEnabled, forKey: .isEnabled)
+        try container.encode(variants, forKey: .variants)
+        try container.encode(activeVariantID, forKey: .activeVariantID)
+        try container.encode(match, forKey: .match)
     }
 }
 

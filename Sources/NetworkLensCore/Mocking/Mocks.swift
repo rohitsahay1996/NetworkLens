@@ -1,3 +1,10 @@
+//
+//  Mocks.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 30/07/26.
+//
+
 import Foundation
 
 /// The registered mock set, and the hit accounting that goes with it.
@@ -5,7 +12,8 @@ import Foundation
 /// Consulted from `LensURLProtocol` on every request, so the empty case costs a
 /// lock and an `isEmpty` check — the matcher chain is not even run until a rule
 /// exists. Mirrors `Breakpoints` deliberately: same lock discipline, same
-/// keyed-by-endpoint `set`, same relaunch semantics.
+/// relaunch semantics — but keyed by endpoint *and* match conditions, since one
+/// endpoint can carry a catch-all rule alongside narrower ones.
 public final class Mocks: @unchecked Sendable {
 
     public static let shared = Mocks()
@@ -37,6 +45,44 @@ public final class Mocks: @unchecked Sendable {
         return mockingEnabled
     }
 
+    /// True when something would actually be served — the master switch is on
+    /// *and* at least one rule is armed.
+    ///
+    /// The question the UI needs answered is "is anything I am looking at
+    /// fake?", and neither half answers it alone: the switch can be on with an
+    /// empty rule set, and rules can sit armed behind a switch that is off.
+    /// Chasing a bug that turns out to be your own mock is the failure this
+    /// exists to prevent.
+    public var isServing: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return mockingEnabled && storage.contains(where: \.isEnabled)
+    }
+
+    /// Whether this endpoint would be answered from the device right now.
+    public func isServing(endpointKey: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return mockingEnabled && storage.contains { $0.endpointKey == endpointKey && $0.isEnabled }
+    }
+
+    /// Switches which answer an endpoint gives, and rewinds its script.
+    ///
+    /// The rewind is the point. Hit counts are per rule, so without it a
+    /// three-step variant selected after two hits would start at step three —
+    /// the tester picks "fails twice then succeeds" and sees it succeed
+    /// immediately, which reads as the tool being broken.
+    public func activateVariant(_ variantID: UUID, forRuleID ruleID: UUID) {
+        lock.lock()
+        guard let index = storage.firstIndex(where: { $0.id == ruleID }) else {
+            return lock.unlock()
+        }
+        storage[index].activate(variantID: variantID)
+        hits[ruleID] = 0
+        lock.unlock()
+        notify()
+    }
+
     public func setMockingEnabled(_ enabled: Bool) {
         lock.lock()
         mockingEnabled = enabled
@@ -44,14 +90,19 @@ public final class Mocks: @unchecked Sendable {
         notify()
     }
 
-    /// Adds the rule, or replaces the existing rule for the same endpoint key.
+    /// Adds the rule, or replaces the one with the same endpoint key *and*
+    /// match conditions.
     ///
-    /// One rule per endpoint. Two rules for one endpoint would make the served
-    /// response depend on insertion order, which is not something anyone can
-    /// reason about from a list.
+    /// Identity is the pair. One rule per endpoint per condition set: a
+    /// catch-all and a `page=2` rule coexist, while saving a second catch-all
+    /// replaces the first. Two rules that could both claim a request would make
+    /// the answer depend on insertion order, which `resolve` refuses to do —
+    /// see the specificity ordering there.
     public func set(_ rule: MockRule) {
         lock.lock()
-        if let index = storage.firstIndex(where: { $0.endpointKey == rule.endpointKey }) {
+        if let index = storage.firstIndex(
+            where: { $0.endpointKey == rule.endpointKey && $0.match == rule.match }
+        ) {
             let replaced = storage[index]
             storage[index] = rule
             if replaced.id != rule.id { hits[replaced.id] = nil }
@@ -157,7 +208,14 @@ public final class Mocks: @unchecked Sendable {
         let key = NetworkLens.endpointKey(for: request)
 
         lock.lock()
-        guard let rule = storage.first(where: { $0.endpointKey == key && $0.isEnabled }) else {
+        // Narrowest wins. A `page=2` rule has to beat the catch-all for the
+        // same endpoint no matter which was saved first; among equals, the
+        // earlier one keeps its claim so the order stays stable across launches.
+        let candidates = storage
+            .filter { $0.endpointKey == key && $0.isEnabled && $0.match.matches(request) }
+        guard
+            let rule = candidates.max(by: { $0.match.specificity < $1.match.specificity })
+        else {
             lock.unlock()
             return nil
         }
