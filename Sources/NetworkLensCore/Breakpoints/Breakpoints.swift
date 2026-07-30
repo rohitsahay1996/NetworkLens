@@ -147,6 +147,36 @@ public final class Breakpoints: @unchecked Sendable {
         notify()
     }
 
+    /// Drops the armed rules but keeps saved perturbations.
+    ///
+    /// The relaunch behaviour once persistence is in play: an armed breakpoint
+    /// that survives a relaunch reads as a hung app, while a perturbation is
+    /// inert until someone applies it and is exactly what a tester saved it
+    /// for. `clearForRelaunch()` remains the "forget everything" path.
+    public func clearRulesForRelaunch() {
+        lock.lock()
+        storage.removeAll()
+        skippedKeys.removeAll()
+        lock.unlock()
+        notify()
+    }
+
+    /// Swaps the whole rule set, for restoring a saved session.
+    public func replaceAll(_ breakpoints: [Breakpoint]) {
+        lock.lock()
+        storage = breakpoints
+        skippedKeys.removeAll()
+        lock.unlock()
+        notify()
+    }
+
+    public func replacePerturbations(_ perturbations: [Perturbation]) {
+        lock.lock()
+        perturbationStorage = perturbations
+        lock.unlock()
+        notify()
+    }
+
     // MARK: - Hot path
 
     public func shouldPauseRequest(for request: URLRequest) -> Bool {

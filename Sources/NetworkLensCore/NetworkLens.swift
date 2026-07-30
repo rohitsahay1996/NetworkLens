@@ -19,8 +19,16 @@ public enum NetworkLens {
     public static func start(configuration: LensConfiguration = .default) {
         state.activate(with: configuration)
 
-        if !configuration.keepBreakpointsAcrossLaunches {
+        if configuration.persistsRules {
+            // Restore decides for itself what may come back armed, so the
+            // unconditional clear below would undo it.
+            LensPersistence.shared.restore(
+                keepingActiveRules: configuration.keepBreakpointsAcrossLaunches
+            )
+            LensPersistence.shared.beginAutosave()
+        } else if !configuration.keepBreakpointsAcrossLaunches {
             Breakpoints.shared.clearForRelaunch()
+            Mocks.shared.clearForRelaunch()
         }
 
         // Covers URLSession.shared, which honours globally registered

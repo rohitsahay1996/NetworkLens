@@ -33,10 +33,22 @@ public struct LensConfiguration: Sendable {
     /// A leading `*.` is accepted and stripped.
     public var productionHostPatterns: [String]
 
-    /// Keep breakpoints and perturbations across launches. Off by default:
-    /// a forgotten breakpoint that survives a relaunch is indistinguishable
-    /// from a hung app.
+    /// Keep breakpoints, perturbations and mock rules across launches. Off by
+    /// default: a forgotten breakpoint that survives a relaunch is
+    /// indistinguishable from a hung app, and a forgotten mock from a backend
+    /// bug.
     public var keepBreakpointsAcrossLaunches: Bool
+
+    /// Write rules to disk and read them back at `start`.
+    ///
+    /// Independent of `keepBreakpointsAcrossLaunches`, which decides what is
+    /// allowed to come back *armed*. With persistence on and that flag off —
+    /// the default pair — saved perturbations survive while breakpoints and
+    /// mocks do not.
+    ///
+    /// Off by default because it writes to Application Support, which is not
+    /// something a debugging tool should start doing to a host app uninvited.
+    public var persistsRules: Bool
 
     public init(
         matchers: [RequestMatcher] = [PathMatcher()],
@@ -46,10 +58,12 @@ public struct LensConfiguration: Sendable {
         maxCapturedRequestBodyBytes: Int = 1_048_576,
         maxCapturedResponseBodyBytes: Int = 1_048_576,
         productionHostPatterns: [String] = [],
-        keepBreakpointsAcrossLaunches: Bool = false
+        keepBreakpointsAcrossLaunches: Bool = false,
+        persistsRules: Bool = false
     ) {
         self.productionHostPatterns = productionHostPatterns
         self.keepBreakpointsAcrossLaunches = keepBreakpointsAcrossLaunches
+        self.persistsRules = persistsRules
         self.matchers = matchers
         self.redactor = redactor
         self.maxStoredExchanges = maxStoredExchanges
