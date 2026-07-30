@@ -1,3 +1,10 @@
+//
+//  Mocking.swift
+//  NetworkLensNoOp
+//
+//  Created by Rohit Sahay on 30/07/26.
+//
+
 import Foundation
 
 // MARK: - Mocking, breakpoints and persistence mirror
@@ -36,7 +43,9 @@ public enum PatchError: Error, Equatable, CustomStringConvertible, Sendable {
 public struct PatchOp: Codable, Sendable, Hashable, Identifiable {
 
     public enum Kind: String, Codable, Sendable {
-        case set, remove, insert
+        case replace
+        case remove
+        case add
     }
 
     public let id: UUID
@@ -84,6 +93,7 @@ public struct EditRecord: Codable, Sendable, Hashable, Identifiable {
     public var originalHash: String
     public var ops: [PatchOp]
     public var perturbationName: String?
+    public var shapeDrifted: Bool
     public var timestamp: Date
 
     public init(
@@ -92,6 +102,7 @@ public struct EditRecord: Codable, Sendable, Hashable, Identifiable {
         originalHash: String,
         ops: [PatchOp],
         perturbationName: String? = nil,
+        shapeDrifted: Bool = false,
         timestamp: Date = Date()
     ) {
         self.id = id
@@ -99,6 +110,7 @@ public struct EditRecord: Codable, Sendable, Hashable, Identifiable {
         self.originalHash = originalHash
         self.ops = ops
         self.perturbationName = perturbationName
+        self.shapeDrifted = shapeDrifted
         self.timestamp = timestamp
     }
 }
@@ -193,6 +205,7 @@ public struct Perturbation: Codable, Sendable, Hashable, Identifiable {
     public var name: String
     public var endpointKey: String
     public var ops: [PatchOp]
+    public var isEnabled: Bool
     public var qaVerified: Bool
     public var verifiedAgainstShape: String?
     public var createdAt: Date
@@ -202,6 +215,7 @@ public struct Perturbation: Codable, Sendable, Hashable, Identifiable {
         name: String,
         endpointKey: String,
         ops: [PatchOp],
+        isEnabled: Bool = false,
         qaVerified: Bool = false,
         verifiedAgainstShape: String? = nil,
         createdAt: Date = Date()
@@ -210,6 +224,7 @@ public struct Perturbation: Codable, Sendable, Hashable, Identifiable {
         self.name = name
         self.endpointKey = endpointKey
         self.ops = ops
+        self.isEnabled = isEnabled
         self.qaVerified = qaVerified
         self.verifiedAgainstShape = verifiedAgainstShape
         self.createdAt = createdAt
@@ -241,6 +256,7 @@ public final class Breakpoints: @unchecked Sendable {
     public func save(_ perturbation: Perturbation) {}
     public func removePerturbation(id: UUID) {}
     public func perturbations(forEndpointKey key: String) -> [Perturbation] { [] }
+    public func enabledPerturbations(forEndpointKey key: String) -> [Perturbation] { [] }
     public func clearForRelaunch() {}
     public func clearRulesForRelaunch() {}
     public func replaceAll(_ breakpoints: [Breakpoint]) {}
@@ -282,10 +298,12 @@ public actor BreakpointCoordinator {
     public struct Pending: Identifiable, @unchecked Sendable {
         public let id: UUID
         public let owner: UUID
+        public let exchangeID: UUID
         public let endpointKey: String
         public let payload: BreakpointPayload
         public let autoResumeAt: Date
         public let pausedAt: Date
+        public var isAutoResumeEnabled: Bool = true
 
         public var stage: EditRecord.Stage { payload.stage }
     }
@@ -295,9 +313,11 @@ public actor BreakpointCoordinator {
         public var queuedCount: Int
         public var position: Int
         public var total: Int
+        public var heldByExchangeID: [UUID: UUID]
 
         public static let empty = PresentationState(
-            presented: nil, queuedCount: 0, position: 0, total: 0
+            presented: nil, queuedCount: 0, position: 0, total: 0,
+            heldByExchangeID: [:]
         )
     }
 
@@ -314,14 +334,17 @@ public actor BreakpointCoordinator {
     public func pause(
         _ payload: BreakpointPayload,
         owner: UUID,
+        exchangeID: UUID,
         endpointKey: String,
         timeout: TimeInterval
     ) async -> BreakpointOutcome {
         .proceed(payload)
     }
 
+    public func setAutoResumeEnabled(_ enabled: Bool, for id: UUID) {}
     public func stageEdit(_ payload: BreakpointPayload, for id: UUID) {}
     public func resolve(id: UUID, with outcome: BreakpointOutcome, reason: ResumeReason = .user) {}
+    public func resume(id: UUID) {}
     public func resumeAll() {}
     public func resumeAllAndDisableBreakpoints() {}
     nonisolated public func dismissPending(for owner: UUID) {}
@@ -436,6 +459,7 @@ public struct MockFailure: Codable, Sendable, Hashable {
 public enum MockOutcome: Codable, Sendable, Hashable {
     case respond(MockResponse)
     case fail(MockFailure)
+    case hang
 
     public var response: MockResponse? {
         if case .respond(let response) = self { return response }
@@ -447,10 +471,20 @@ public enum MockOutcome: Codable, Sendable, Hashable {
         return nil
     }
 
+    public func settingDelay(_ delay: TimeInterval) -> MockOutcome { self }
+
+    public static let delayPresets: [TimeInterval] = [0, 0.5, 1, 3, 10]
+
+    public var isHang: Bool {
+        if case .hang = self { return true }
+        return false
+    }
+
     public var delay: TimeInterval {
         switch self {
         case .respond(let response): return response.delay
         case .fail(let failure): return failure.delay
+        case .hang: return 0
         }
     }
 
@@ -458,6 +492,7 @@ public enum MockOutcome: Codable, Sendable, Hashable {
         switch self {
         case .respond(let response): return "\(response.statusCode)"
         case .fail(let failure): return failure.label
+        case .hang: return "never answers"
         }
     }
 }
@@ -474,14 +509,81 @@ public enum MockExhaustion: String, Codable, Sendable, CaseIterable {
     }
 }
 
+/// Mirror of the variant library. Nothing is ever served, so nothing switches.
+/// Mirror of the match conditions. Nothing resolves here, so nothing matches.
+public struct MockMatch: Codable, Sendable, Hashable {
+
+    public var query: [String: String]
+    public var headers: [String: String]
+    public var bodyContains: String?
+
+    public static let anyValue = "*"
+    public static let any = MockMatch()
+
+    public init(
+        query: [String: String] = [:],
+        headers: [String: String] = [:],
+        bodyContains: String? = nil
+    ) {
+        self.query = query
+        self.headers = headers
+        self.bodyContains = bodyContains
+    }
+
+    public var isCatchAll: Bool { true }
+    public var specificity: Int { 0 }
+    public var summary: String? { nil }
+    public func matches(_ request: URLRequest) -> Bool { false }
+    public static func matchingQuery(of request: RequestSnapshot) -> MockMatch { .any }
+}
+
+public struct MockVariant: Codable, Sendable, Hashable, Identifiable {
+
+    public let id: UUID
+    public var name: String
+    public var steps: [MockOutcome]
+    public var exhaustion: MockExhaustion
+    public var requestSample: Data?
+
+    public init(
+        id: UUID = UUID(),
+        name: String,
+        steps: [MockOutcome],
+        exhaustion: MockExhaustion = .repeatLast,
+        requestSample: Data? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.steps = steps.isEmpty ? [.respond(MockResponse())] : steps
+        self.exhaustion = exhaustion
+        self.requestSample = requestSample
+    }
+
+    public var isScripted: Bool { steps.count > 1 }
+
+    public private(set) var variants: [MockVariant] = []
+    public private(set) var activeVariantID: UUID = UUID()
+    public var activeVariant: MockVariant {
+        get { MockVariant(name: name ?? "default", steps: steps, exhaustion: exhaustion) }
+        set {}
+    }
+    public mutating func activate(variantID: UUID) {}
+    public mutating func addVariant(_ variant: MockVariant, activate: Bool = true) {}
+    public mutating func updateVariant(_ variant: MockVariant) {}
+    public mutating func removeVariant(id: UUID) {}
+    public func outcome(forHit hit: Int) -> MockOutcome? { nil }
+}
+
 public struct MockRule: Codable, Sendable, Hashable, Identifiable {
 
     public let id: UUID
     public var endpointKey: String
     public var isEnabled: Bool
+    public var match: MockMatch = .any
     public var steps: [MockOutcome]
     public var exhaustion: MockExhaustion
     public var name: String?
+    public var requestSample: Data?
 
     public init(
         id: UUID = UUID(),
@@ -489,7 +591,8 @@ public struct MockRule: Codable, Sendable, Hashable, Identifiable {
         steps: [MockOutcome],
         exhaustion: MockExhaustion = .repeatLast,
         isEnabled: Bool = true,
-        name: String? = nil
+        name: String? = nil,
+        requestSample: Data? = nil
     ) {
         self.id = id
         self.endpointKey = endpointKey
@@ -497,6 +600,7 @@ public struct MockRule: Codable, Sendable, Hashable, Identifiable {
         self.exhaustion = exhaustion
         self.isEnabled = isEnabled
         self.name = name
+        self.requestSample = requestSample
     }
 
     public init(
@@ -504,11 +608,12 @@ public struct MockRule: Codable, Sendable, Hashable, Identifiable {
         endpointKey: String,
         response: MockResponse,
         isEnabled: Bool = true,
-        name: String? = nil
+        name: String? = nil,
+        requestSample: Data? = nil
     ) {
         self.init(
             id: id, endpointKey: endpointKey, steps: [.respond(response)],
-            isEnabled: isEnabled, name: name
+            isEnabled: isEnabled, name: name, requestSample: requestSample
         )
     }
 
@@ -556,6 +661,29 @@ public struct MockResolution: Sendable, Hashable {
     public var failure: MockFailure? { outcome.failure }
 }
 
+/// Nothing ever hangs in a release build, so nothing is ever parked here.
+public final class HangingRequests: @unchecked Sendable {
+
+    public static let shared = HangingRequests()
+
+    public struct ObservationToken: Sendable {
+        public func invalidate() {}
+    }
+
+    public init() {}
+
+    public var hanging: [UUID] { [] }
+    public func register(_ exchangeID: UUID) {}
+    public func unregister(_ exchangeID: UUID) {}
+    public func isReleased(_ exchangeID: UUID) -> Bool { false }
+    public func isHanging(_ exchangeID: UUID) -> Bool { false }
+    public func release(_ exchangeID: UUID) {}
+    public func releaseAll() {}
+    public func addObserver(_ observer: @escaping () -> Void) -> ObservationToken {
+        ObservationToken()
+    }
+}
+
 public final class Mocks: @unchecked Sendable {
 
     public static let shared = Mocks()
@@ -565,6 +693,9 @@ public final class Mocks: @unchecked Sendable {
     public var all: [MockRule] { [] }
     public var isMockingEnabled: Bool { false }
 
+    public var isServing: Bool { false }
+    public func isServing(endpointKey: String) -> Bool { false }
+    public func activateVariant(_ variantID: UUID, forRuleID ruleID: UUID) {}
     public func setMockingEnabled(_ enabled: Bool) {}
     public func set(_ rule: MockRule) {}
     public func remove(id: UUID) {}
@@ -697,4 +828,18 @@ public enum BodyReader {
 public enum LensSwizzler {
     public static func installConfigurationHooks() {}
     public static func installTaskHooks() {}
+}
+
+/// Nothing is recorded in a release build, so nothing is replayable.
+public final class ReplayStore: @unchecked Sendable {
+
+    public static let shared = ReplayStore()
+
+    public init(limit: Int = 200) {}
+
+    public func record(_ request: URLRequest, for exchangeID: UUID) {}
+    public func request(for exchangeID: UUID) -> URLRequest? { nil }
+    public func canReplay(_ exchangeID: UUID) -> Bool { false }
+    public func removeAll() {}
+    public var count: Int { 0 }
 }

@@ -1,3 +1,10 @@
+//
+//  NetworkLens.swift
+//  NetworkLensNoOp
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 #if canImport(UIKit)
@@ -23,6 +30,28 @@ public enum NetworkLens {
     public static func install(into config: URLSessionConfiguration) {}
 
     public static func record(_ exchange: NetworkExchange) {}
+
+    /// Hands the request straight back. Nothing reads the tag in a release
+    /// build, and a stamped `URLProtocol` property on a request nobody
+    /// intercepts is dead weight on every call site that attributes traffic.
+    public static func tagged(_ request: URLRequest, screen: String) -> URLRequest { request }
+
+    public enum ReplayError: Error, Equatable, Sendable {
+        case originalRequestUnavailable
+    }
+
+    /// Nothing is captured in a release build, so nothing can be sent again.
+    @discardableResult
+    public static func replay(_ exchange: NetworkExchange) async throws -> NetworkExchange? {
+        throw ReplayError.originalRequestUnavailable
+    }
+
+    public static func canReplay(_ exchange: NetworkExchange) -> Bool { false }
+
+    public static var clock: LensClock {
+        get { SystemClock() }
+        set {}
+    }
 
     public static var store: ExchangeStore { ExchangeStore() }
 
@@ -365,6 +394,9 @@ public struct NetworkExchange: Identifiable, Codable, Sendable, Hashable {
     public let startedAt: Date
     public let source: Source
     public let edits: [EditRecord]
+    public var isMockServed: Bool
+    public var replayOf: UUID?
+    public var isReplay: Bool { false }
 
     public init(
         id: UUID = UUID(),
@@ -376,7 +408,9 @@ public struct NetworkExchange: Identifiable, Codable, Sendable, Hashable {
         timing: Timing? = nil,
         startedAt: Date = Date(),
         source: Source = .live,
-        edits: [EditRecord] = []
+        edits: [EditRecord] = [],
+        isMockServed: Bool = false,
+        replayOf: UUID? = nil
     ) {
         self.id = id
         self.endpointKey = endpointKey
@@ -388,6 +422,8 @@ public struct NetworkExchange: Identifiable, Codable, Sendable, Hashable {
         self.startedAt = startedAt
         self.source = source
         self.edits = edits
+        self.isMockServed = isMockServed
+        self.replayOf = replayOf
     }
 
     public var isInFlight: Bool { false }
@@ -396,6 +432,9 @@ public struct NetworkExchange: Identifiable, Codable, Sendable, Hashable {
     public func failed(_ failure: FailureInfo, timing: Timing? = nil) -> NetworkExchange { self }
     public func replacingRequest(_ request: RequestSnapshot, source: Source) -> NetworkExchange { self }
     public func withSource(_ source: Source) -> NetworkExchange { self }
+    public func servedFromMock() -> NetworkExchange { self }
+    public func addingSource(_ source: Source) -> NetworkExchange { self }
+    public func resumedToNetwork() -> NetworkExchange { self }
     public func loggingEdit(_ record: EditRecord) -> NetworkExchange { self }
     public func redacted(by redactor: Redactor) -> NetworkExchange { self }
 }
@@ -503,4 +542,25 @@ public enum JSONNodeSerializer {
 
     public static func string(from node: JSONNode, format: Format = .compact) -> String { "" }
     public static func data(from node: JSONNode, format: Format = .compact) -> Data { Data() }
+}
+
+/// Mirror of the clock seam. A release build has nothing that waits.
+public protocol LensClock: Sendable {
+    var now: Date { get }
+    func sleep(for interval: TimeInterval) async throws
+}
+
+public struct SystemClock: LensClock {
+    public init() {}
+    public var now: Date { Date() }
+    public func sleep(for interval: TimeInterval) async throws {}
+}
+
+public final class TestClock: LensClock, @unchecked Sendable {
+    public init(now: Date = Date(timeIntervalSince1970: 0)) {}
+    public var now: Date { Date(timeIntervalSince1970: 0) }
+    public var sleeperCount: Int { 0 }
+    public func sleep(for interval: TimeInterval) async throws {}
+    public func advance(by interval: TimeInterval) {}
+    public func advance(by interval: TimeInterval, afterSleepers count: Int) async throws {}
 }
