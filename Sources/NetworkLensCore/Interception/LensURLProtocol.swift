@@ -99,8 +99,14 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
         // Record in flight so the overlay shows the row while it is pending.
         NetworkLens.record(exchange)
 
+        // --- Mock --------------------------------------------------------------
+        // Claimed before the request breakpoint, and exactly once: a mocked
+        // request never leaves the device, so there is nothing to hold and edit
+        // on the way out, and the production-host guard has nothing to protect.
+        let mock = Mocks.shared.resolve(outgoing)
+
         // --- Request breakpoint ------------------------------------------------
-        if Breakpoints.shared.shouldPauseRequest(for: outgoing) {
+        if mock == nil, Breakpoints.shared.shouldPauseRequest(for: outgoing) {
             let outcome = await BreakpointCoordinator.shared.pause(
                 .request(outgoing),
                 owner: instanceID,
@@ -126,8 +132,15 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
             }
         }
 
-        // --- Network -----------------------------------------------------------
-        let result = await perform(outgoing, cap: configuration.maxCapturedResponseBodyBytes)
+        // --- Network, or the mock in its place ---------------------------------
+        let result: Swift.Result<ResponsePayload, Error>
+        if let mock {
+            exchange = exchange.withSource(.mocked)
+            NetworkLens.record(exchange)
+            result = await serve(mock, for: outgoing)
+        } else {
+            result = await perform(outgoing, cap: configuration.maxCapturedResponseBodyBytes)
+        }
         guard !Task.isCancelled else { return }
 
         var payload: ResponsePayload
@@ -176,6 +189,54 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
         client?.urlProtocol(self, didReceive: payload.response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: payload.body)
         client?.urlProtocolDidFinishLoading(self)
+    }
+
+    // MARK: - Mock
+
+    /// Serves a claimed mock, imposing its delay first.
+    ///
+    /// The delay is bounded by the request's own `timeoutInterval`, and a delay
+    /// that reaches it fails with `.timedOut` rather than sleeping past it. A
+    /// mock is the one thing that can hang an app forever — the real stack
+    /// always eventually times out — so it has to time out too.
+    private func serve(
+        _ mock: MockResolution, for request: URLRequest
+    ) async -> Swift.Result<ResponsePayload, Error> {
+        let startedAt = Date()
+
+        if let timedOut = await imposeDelay(mock.outcome.delay, timeout: request.timeoutInterval) {
+            return .failure(timedOut)
+        }
+
+        switch mock.outcome {
+        case .fail(let failure):
+            // Handed over as a plain `URLError`, so the app's retry and
+            // offline paths cannot tell it from the real thing.
+            return .failure(failure.urlError)
+
+        case .respond(let response):
+            let url = request.url ?? URL(string: "about:blank")!
+            return .success(
+                response.payload(for: url, elapsed: Date().timeIntervalSince(startedAt))
+            )
+        }
+    }
+
+    /// Sleeps for `delay`, or returns the error the real stack would raise if
+    /// the wait outlives the request's timeout.
+    private func imposeDelay(_ delay: TimeInterval, timeout: TimeInterval) async -> URLError? {
+        let delay = max(0, delay)
+        guard delay > 0 else { return nil }
+
+        // A zero or negative `timeoutInterval` means "no timeout"; the ceiling
+        // then only exists to keep the sleep out of overflow range.
+        let ceiling: TimeInterval = timeout > 0 ? timeout : 600
+        do {
+            try await Task.sleep(nanoseconds: UInt64(min(delay, ceiling) * 1_000_000_000))
+        } catch {
+            return URLError(.cancelled)
+        }
+        return delay >= ceiling ? URLError(.timedOut) : nil
     }
 
     // MARK: - Passthrough
