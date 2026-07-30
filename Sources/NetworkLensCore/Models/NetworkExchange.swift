@@ -1,3 +1,10 @@
+//
+//  NetworkExchange.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// Where the bytes came from.
@@ -30,6 +37,31 @@ public enum Source: Codable, Sendable, Hashable {
         return true
     }
 
+    /// Combines two provenances into one, keeping both claims.
+    ///
+    /// Overwriting loses the part that matters. A mocked response that a saved
+    /// perturbation then rewrote used to report only `perturbed`, so a bug
+    /// report could not say whether the bytes came from a server or from the
+    /// device — which is the first thing anyone reading it needs to know.
+    ///
+    /// `live` never survives contact with anything else: once a payload has
+    /// been touched, calling it live would be a lie.
+    public func combined(with next: Source) -> Source {
+        switch (self, next) {
+        case (.live, _):
+            return next
+        case (_, .live):
+            return self
+        case (.mocked, .mocked):
+            return .mocked
+        default:
+            // Later provenance names what the reader sees now; the trail of how
+            // it got there lives in `NetworkExchange.edits`.
+            return next
+        }
+    }
+
+
     /// Every case, with a placeholder name for the associated-value one, for
     /// legends and filter pickers.
     public static var displayCases: [Source] {
@@ -54,6 +86,13 @@ public struct EditRecord: Codable, Sendable, Hashable, Identifiable {
     public var ops: [PatchOp]
     /// Set when the edit came from a saved perturbation rather than by hand.
     public var perturbationName: String?
+    /// The payload no longer had the shape this perturbation was captured
+    /// against — the contract moved under a saved edit.
+    ///
+    /// Recorded rather than used to skip the edit: an edit that silently
+    /// declines to apply is indistinguishable from a broken tool, while one
+    /// that applies and says so sends the tester to look at the contract.
+    public var shapeDrifted: Bool
     public var timestamp: Date
 
     public init(
@@ -62,6 +101,7 @@ public struct EditRecord: Codable, Sendable, Hashable, Identifiable {
         originalHash: String,
         ops: [PatchOp],
         perturbationName: String? = nil,
+        shapeDrifted: Bool = false,
         timestamp: Date = Date()
     ) {
         self.id = id
@@ -69,6 +109,7 @@ public struct EditRecord: Codable, Sendable, Hashable, Identifiable {
         self.originalHash = originalHash
         self.ops = ops
         self.perturbationName = perturbationName
+        self.shapeDrifted = shapeDrifted
         self.timestamp = timestamp
     }
 }
@@ -102,6 +143,21 @@ public struct NetworkExchange: Identifiable, Codable, Sendable, Hashable {
     /// export and the bug report bundle.
     public let edits: [EditRecord]
 
+    /// These bytes were produced on the device, never received.
+    ///
+    /// Separate from `source`, which carries the *latest* label and moves when
+    /// a perturbation rewrites a mocked response. Whether the network was
+    /// involved cannot be relabelled away — it is the first thing a bug report
+    /// needs and the last thing that should be inferred from a display string.
+    public var isMockServed: Bool
+
+    /// The exchange this one was fired from, when a tester replayed it.
+    ///
+    /// Kept so a row can say it is a repeat rather than something the app did,
+    /// which matters most on the screens replay is for: four calls, three of
+    /// them replayed, one real.
+    public var replayOf: UUID?
+
     public init(
         id: UUID = UUID(),
         endpointKey: String,
@@ -112,7 +168,9 @@ public struct NetworkExchange: Identifiable, Codable, Sendable, Hashable {
         timing: Timing? = nil,
         startedAt: Date = Date(),
         source: Source = .live,
-        edits: [EditRecord] = []
+        edits: [EditRecord] = [],
+        isMockServed: Bool = false,
+        replayOf: UUID? = nil
     ) {
         self.id = id
         self.endpointKey = endpointKey
@@ -124,7 +182,12 @@ public struct NetworkExchange: Identifiable, Codable, Sendable, Hashable {
         self.startedAt = startedAt
         self.source = source
         self.edits = edits
+        self.isMockServed = isMockServed
+        self.replayOf = replayOf
     }
+
+    /// True when this request was fired by the tool rather than the app.
+    public var isReplay: Bool { replayOf != nil }
 
     /// True until a response or failure lands.
     public var isInFlight: Bool { response == nil && failure == nil }
@@ -142,7 +205,9 @@ public struct NetworkExchange: Identifiable, Codable, Sendable, Hashable {
             timing: timing,
             startedAt: startedAt,
             source: source,
-            edits: edits
+            edits: edits,
+            isMockServed: isMockServed,
+            replayOf: replayOf
         )
     }
 
@@ -158,7 +223,9 @@ public struct NetworkExchange: Identifiable, Codable, Sendable, Hashable {
             timing: timing ?? self.timing,
             startedAt: startedAt,
             source: source,
-            edits: edits
+            edits: edits,
+            isMockServed: isMockServed,
+            replayOf: replayOf
         )
     }
 
@@ -174,8 +241,33 @@ public struct NetworkExchange: Identifiable, Codable, Sendable, Hashable {
             timing: timing,
             startedAt: startedAt,
             source: source,
-            edits: edits
+            edits: edits,
+            isMockServed: isMockServed,
+            replayOf: replayOf
         )
+    }
+
+    /// Copy that records these bytes as device-produced.
+    public func servedFromMock() -> NetworkExchange {
+        var copy = withSource(source.combined(with: .mocked))
+        copy.isMockServed = true
+        return copy
+    }
+
+    /// Copy that hands the request back to the network.
+    ///
+    /// A released hang was claimed by a mock and then resumed to the real
+    /// server, so the bytes about to arrive are the server's — the device
+    /// origin has to be given back, not just relabelled.
+    public func resumedToNetwork() -> NetworkExchange {
+        var copy = withSource(.live)
+        copy.isMockServed = false
+        return copy
+    }
+
+    /// Copy whose provenance label folds in `source` rather than replacing it.
+    public func addingSource(_ source: Source) -> NetworkExchange {
+        withSource(self.source.combined(with: source))
     }
 
     /// Copy with a different provenance, for when a breakpoint changed a payload.
@@ -190,7 +282,9 @@ public struct NetworkExchange: Identifiable, Codable, Sendable, Hashable {
             timing: timing,
             startedAt: startedAt,
             source: source,
-            edits: edits
+            edits: edits,
+            isMockServed: isMockServed,
+            replayOf: replayOf
         )
     }
 
@@ -206,7 +300,9 @@ public struct NetworkExchange: Identifiable, Codable, Sendable, Hashable {
             timing: timing,
             startedAt: startedAt,
             source: source,
-            edits: edits + [record]
+            edits: edits + [record],
+            isMockServed: isMockServed,
+            replayOf: replayOf
         )
     }
 
@@ -222,7 +318,9 @@ public struct NetworkExchange: Identifiable, Codable, Sendable, Hashable {
             timing: timing,
             startedAt: startedAt,
             source: source,
-            edits: edits
+            edits: edits,
+            isMockServed: isMockServed,
+            replayOf: replayOf
         )
     }
 }

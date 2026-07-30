@@ -1,3 +1,10 @@
+//
+//  LensURLProtocol.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// Intercepts `URLSession` traffic.
@@ -20,6 +27,10 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
     /// Identity carried from task creation so the recorded exchange and any
     /// breakpoint UI refer to the same thing.
     static let exchangeIDKey = "com.networklens.exchangeID"
+
+    /// Set when the tool fired this request itself, naming the exchange it
+    /// repeats.
+    static let replayOfKey = "com.networklens.replayOf"
 
     private var work: Task<Void, Never>?
 
@@ -94,10 +105,17 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
             endpointKey: NetworkLens.endpointKey(for: outgoing),
             screen: screen,
             request: requestSnapshot,
-            startedAt: startedAt
+            startedAt: startedAt,
+            replayOf: URLProtocol.property(forKey: Self.replayOfKey, in: request) as? UUID
         )
         // Record in flight so the overlay shows the row while it is pending.
         NetworkLens.record(exchange)
+
+        // Kept unredacted and in memory only, so this request can be fired
+        // again later. `requestSnapshot` cannot serve — it is redacted on the
+        // way into the store, and replaying `Authorization: ***` earns a 401
+        // that has nothing to do with what was under test.
+        ReplayStore.shared.record(outgoing, for: exchange.id)
 
         // --- Mock --------------------------------------------------------------
         // Claimed before the request breakpoint, and exactly once: a mocked
@@ -110,6 +128,7 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
             let outcome = await BreakpointCoordinator.shared.pause(
                 .request(outgoing),
                 owner: instanceID,
+                exchangeID: exchange.id,
                 endpointKey: exchange.endpointKey,
                 timeout: outgoing.timeoutInterval
             )
@@ -118,10 +137,16 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
             switch outcome {
             case .proceed(let edited):
                 if case .request(let editedRequest) = edited {
+                    let before = outgoing.httpBody
                     outgoing = editedRequest
                     var snapshot = RequestSnapshot(request: outgoing)
                     snapshot.bodyTruncated = requestSnapshot.bodyTruncated
                     exchange = exchange.replacingRequest(snapshot, source: .edited)
+                    if let record = Self.editRecord(
+                        stage: .request, from: before, to: outgoing.httpBody
+                    ) {
+                        exchange = exchange.loggingEdit(record)
+                    }
                     NetworkLens.record(exchange)
                 }
             case .abort(let error):
@@ -134,8 +159,26 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
 
         // --- Network, or the mock in its place ---------------------------------
         let result: Swift.Result<ResponsePayload, Error>
-        if let mock {
-            exchange = exchange.withSource(.mocked)
+        if let mock, mock.outcome.isHang {
+            // Answers nothing until told to. The exchange stays recorded in
+            // flight so the row shows what the app is showing, and the client
+            // is left untouched — whatever the app does about its own timeout
+            // is the app's real behaviour, which is the thing under test.
+            exchange = exchange.servedFromMock()
+            NetworkLens.record(exchange)
+
+            switch await hangUntilReleasedOrCancelled(exchangeID: exchange.id) {
+            case .cancelled:
+                return
+            case .released:
+                // Resumes where it was suspended rather than synthesising a
+                // response: the loaded state has to be the server's, not the
+                // tool's invention.
+                exchange = exchange.resumedToNetwork()
+                result = await perform(outgoing, cap: configuration.maxCapturedResponseBodyBytes)
+            }
+        } else if let mock {
+            exchange = exchange.servedFromMock()
             NetworkLens.record(exchange)
             result = await serve(mock, for: outgoing)
         } else {
@@ -154,11 +197,18 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
             return
         }
 
+        // --- Perturbations -----------------------------------------------------
+        // Before the breakpoint, so a tester who stops here sees the payload the
+        // app would actually have received rather than one the tool is about to
+        // change behind them.
+        applyPerturbations(to: &payload, exchange: &exchange)
+
         // --- Response breakpoint -----------------------------------------------
         if Breakpoints.shared.shouldPauseResponse(for: outgoing) {
             let outcome = await BreakpointCoordinator.shared.pause(
                 .response(payload),
                 owner: instanceID,
+                exchangeID: exchange.id,
                 endpointKey: exchange.endpointKey,
                 timeout: outgoing.timeoutInterval
             )
@@ -169,7 +219,12 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
                 if case .response(let editedPayload) = edited {
                     if editedPayload.body != payload.body
                         || editedPayload.response.statusCode != payload.response.statusCode {
-                        exchange = exchange.withSource(.edited)
+                        exchange = exchange.addingSource(.edited)
+                        if let record = Self.editRecord(
+                            stage: .response, from: payload.body, to: editedPayload.body
+                        ) {
+                            exchange = exchange.loggingEdit(record)
+                        }
                     }
                     payload = editedPayload
                 }
@@ -219,7 +274,122 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
             return .success(
                 response.payload(for: url, elapsed: Date().timeIntervalSince(startedAt))
             )
+
+        case .hang:
+            // Claimed before this point in `run()`, which returns without ever
+            // answering. Reaching here would mean a hang had been turned into
+            // some other outcome, so fail loudly rather than inventing one.
+            assertionFailure("a hanging outcome must be handled before serve(_:for:)")
+            return .failure(URLError(.timedOut))
         }
+    }
+
+    // MARK: - Edit records
+
+    /// Describes a hand edit as the ops that produced it.
+    ///
+    /// A saved perturbation has always recorded this; an edit made by a human
+    /// at a breakpoint recorded only that *something* changed. That is the
+    /// weaker half of the audit trail and the one that matters more — a bug
+    /// report says "with this field set to null", and only the ops can prove
+    /// that is what happened.
+    ///
+    /// Bodies that are not both JSON still produce a record, with no ops: the
+    /// stage and the original's hash are worth keeping even when the change
+    /// cannot be expressed as a patch.
+    private static func editRecord(
+        stage: EditRecord.Stage, from before: Data?, to after: Data?
+    ) -> EditRecord? {
+        guard before != after else { return nil }
+
+        let originalTree = (before?.isEmpty == false) ? try? JSONNodeParser.parse(before!) : nil
+        let editedTree = (after?.isEmpty == false) ? try? JSONNodeParser.parse(after!) : nil
+
+        let ops: [PatchOp]
+        if let originalTree, let editedTree {
+            ops = JSONDiff.ops(from: originalTree, to: editedTree)
+        } else {
+            ops = []
+        }
+
+        return EditRecord(
+            stage: stage,
+            originalHash: originalTree?.contentHash ?? "",
+            ops: ops
+        )
+    }
+
+    // MARK: - Perturbations
+
+    /// Applies every armed perturbation for this endpoint, in save order.
+    ///
+    /// Stored as ops rather than as a whole payload, so an edit written months
+    /// ago against three fields keeps meaning the same thing after the server
+    /// adds a fourth. A body that is not JSON is left alone: there is nothing
+    /// for a JSON Pointer to address, and rewriting bytes blind would corrupt
+    /// the payload rather than perturb it.
+    ///
+    /// One `EditRecord` per perturbation, so the exchange can prove afterwards
+    /// exactly what was changed and by which saved edit — the thing that makes
+    /// a mocked bug report believable.
+    private func applyPerturbations(
+        to payload: inout ResponsePayload, exchange: inout NetworkExchange
+    ) {
+        let armed = Breakpoints.shared.enabledPerturbations(forEndpointKey: exchange.endpointKey)
+        guard !armed.isEmpty else { return }
+        guard var tree = try? JSONNodeParser.parse(payload.body) else { return }
+
+        var applied = false
+        for perturbation in armed {
+            let originalHash = tree.contentHash
+            guard let outcome = try? perturbation.apply(to: tree) else {
+                // A pointer that no longer resolves is a contract change, not a
+                // reason to fail the request. Skip this one, keep the rest.
+                continue
+            }
+            tree = outcome.result
+            applied = true
+            exchange = exchange
+                .loggingEdit(
+                    EditRecord(
+                        stage: .response,
+                        originalHash: originalHash,
+                        ops: perturbation.ops,
+                        perturbationName: perturbation.name,
+                        shapeDrifted: outcome.shapeDrifted
+                    )
+                )
+                .addingSource(.perturbed(name: perturbation.name))
+        }
+
+        guard applied else { return }
+        payload = payload.replacingBody(JSONNodeSerializer.data(from: tree))
+        NetworkLens.record(exchange)
+    }
+
+    private enum HangEnding {
+        case released
+        case cancelled
+    }
+
+    /// Stays pending until someone releases it or the task is cancelled.
+    ///
+    /// Polls rather than sleeping once for a very long time so that both
+    /// endings land promptly: `stopLoading` — the app navigating away — and a
+    /// tester tapping "Load it now" from the overlay.
+    private func hangUntilReleasedOrCancelled(exchangeID: UUID) async -> HangEnding {
+        HangingRequests.shared.register(exchangeID)
+        defer { HangingRequests.shared.unregister(exchangeID) }
+
+        while !Task.isCancelled {
+            if HangingRequests.shared.isReleased(exchangeID) { return .released }
+            do {
+                try await NetworkLens.clock.sleep(for: 0.1)
+            } catch {
+                return .cancelled
+            }
+        }
+        return .cancelled
     }
 
     /// Sleeps for `delay`, or returns the error the real stack would raise if
@@ -232,7 +402,7 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
         // then only exists to keep the sleep out of overflow range.
         let ceiling: TimeInterval = timeout > 0 ? timeout : 600
         do {
-            try await Task.sleep(nanoseconds: UInt64(min(delay, ceiling) * 1_000_000_000))
+            try await NetworkLens.clock.sleep(for: min(delay, ceiling))
         } catch {
             return URLError(.cancelled)
         }
@@ -281,6 +451,15 @@ extension URLRequest {
             return self
         }
         URLProtocol.setProperty(true, forKey: LensURLProtocol.handledKey, in: mutable)
+        return mutable as URLRequest
+    }
+
+    /// Marks a request as a replay of `exchangeID`.
+    func stampedAsReplay(of exchangeID: UUID) -> URLRequest {
+        guard let mutable = (self as NSURLRequest).mutableCopy() as? NSMutableURLRequest else {
+            return self
+        }
+        URLProtocol.setProperty(exchangeID, forKey: LensURLProtocol.replayOfKey, in: mutable)
         return mutable as URLRequest
     }
 
