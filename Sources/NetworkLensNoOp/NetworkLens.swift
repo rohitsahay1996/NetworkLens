@@ -48,6 +48,9 @@ public struct LensConfiguration: Sendable {
     public var automaticScreenAttribution: Bool
     public var maxCapturedRequestBodyBytes: Int
     public var maxCapturedResponseBodyBytes: Int
+    public var productionHostPatterns: [String]
+    public var keepBreakpointsAcrossLaunches: Bool
+    public var persistsRules: Bool
 
     public init(
         matchers: [RequestMatcher] = [PathMatcher()],
@@ -55,7 +58,10 @@ public struct LensConfiguration: Sendable {
         maxStoredExchanges: Int = 500,
         automaticScreenAttribution: Bool = true,
         maxCapturedRequestBodyBytes: Int = 1_048_576,
-        maxCapturedResponseBodyBytes: Int = 1_048_576
+        maxCapturedResponseBodyBytes: Int = 1_048_576,
+        productionHostPatterns: [String] = [],
+        keepBreakpointsAcrossLaunches: Bool = false,
+        persistsRules: Bool = false
     ) {
         self.matchers = matchers
         self.redactor = redactor
@@ -63,7 +69,14 @@ public struct LensConfiguration: Sendable {
         self.automaticScreenAttribution = automaticScreenAttribution
         self.maxCapturedRequestBodyBytes = maxCapturedRequestBodyBytes
         self.maxCapturedResponseBodyBytes = maxCapturedResponseBodyBytes
+        self.productionHostPatterns = productionHostPatterns
+        self.keepBreakpointsAcrossLaunches = keepBreakpointsAcrossLaunches
+        self.persistsRules = persistsRules
     }
+
+    /// Always false here. Nothing in this target can arm a breakpoint, so
+    /// there is nothing for the production guard to refuse.
+    public func isProductionHost(_ host: String?) -> Bool { false }
 
     public static var `default`: LensConfiguration { LensConfiguration() }
 
@@ -316,8 +329,29 @@ public struct FailureInfo: Codable, Sendable, Hashable {
     public init?(statusCode: Int) { return nil }
 }
 
-public enum Source: String, Codable, Sendable, CaseIterable {
-    case live, mocked
+public enum Source: Codable, Sendable, Hashable {
+    case live
+    case mocked
+    case edited
+    case perturbed(name: String)
+
+    public var label: String {
+        switch self {
+        case .live: return "live"
+        case .mocked: return "mocked"
+        case .edited: return "edited"
+        case .perturbed(let name): return name
+        }
+    }
+
+    public var isSynthetic: Bool {
+        if case .live = self { return false }
+        return true
+    }
+
+    public static var displayCases: [Source] {
+        [.live, .mocked, .edited, .perturbed(name: "perturbed")]
+    }
 }
 
 public struct NetworkExchange: Identifiable, Codable, Sendable, Hashable {
@@ -330,6 +364,7 @@ public struct NetworkExchange: Identifiable, Codable, Sendable, Hashable {
     public let timing: Timing?
     public let startedAt: Date
     public let source: Source
+    public let edits: [EditRecord]
 
     public init(
         id: UUID = UUID(),
@@ -340,7 +375,8 @@ public struct NetworkExchange: Identifiable, Codable, Sendable, Hashable {
         failure: FailureInfo? = nil,
         timing: Timing? = nil,
         startedAt: Date = Date(),
-        source: Source = .live
+        source: Source = .live,
+        edits: [EditRecord] = []
     ) {
         self.id = id
         self.endpointKey = endpointKey
@@ -351,12 +387,16 @@ public struct NetworkExchange: Identifiable, Codable, Sendable, Hashable {
         self.timing = timing
         self.startedAt = startedAt
         self.source = source
+        self.edits = edits
     }
 
     public var isInFlight: Bool { false }
 
     public func completed(response: ResponseSnapshot, timing: Timing?) -> NetworkExchange { self }
     public func failed(_ failure: FailureInfo, timing: Timing? = nil) -> NetworkExchange { self }
+    public func replacingRequest(_ request: RequestSnapshot, source: Source) -> NetworkExchange { self }
+    public func withSource(_ source: Source) -> NetworkExchange { self }
+    public func loggingEdit(_ record: EditRecord) -> NetworkExchange { self }
     public func redacted(by redactor: Redactor) -> NetworkExchange { self }
 }
 
@@ -409,7 +449,7 @@ public final class ExchangeStore: @unchecked Sendable {
 
 // MARK: - JSON
 
-public indirect enum JSONNode: Sendable, Hashable {
+public indirect enum JSONNode: Sendable, Hashable, Codable {
     case object([Entry])
     case array([JSONNode])
     case string(String)
@@ -425,6 +465,16 @@ public indirect enum JSONNode: Sendable, Hashable {
             self.key = key
             self.value = value
         }
+    }
+
+    /// Core round-trips a tree through real JSON. Here the conformance exists
+    /// only so `PatchOp` and `Perturbation` stay `Codable` for host call
+    /// sites; nothing in this target has a tree worth encoding.
+    public init(from decoder: Decoder) throws { self = .null }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encodeNil()
     }
 
     public subscript(key: String) -> JSONNode? { nil }

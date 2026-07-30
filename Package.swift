@@ -16,5 +16,9 @@ let package = Package(
         .target(name: "NetworkLensUI", dependencies: ["NetworkLensCore"]),
         .target(name: "NetworkLensNoOp"),
         .testTarget(name: "NetworkLensCoreTests", dependencies: ["NetworkLensCore"]),
+        // Compiles host-shaped call sites against the inert mirror. Its job is
+        // to fail the build when Core grows API that NoOp did not, which is
+        // otherwise only discovered by a release build months later.
+        .testTarget(name: "NetworkLensNoOpTests", dependencies: ["NetworkLensNoOp"]),
     ]
 )
