@@ -1,3 +1,10 @@
+//
+//  APIParityTests.swift
+//  NetworkLensNoOpTests
+//
+//  Created by Rohit Sahay on 30/07/26.
+//
+
 import XCTest
 import NetworkLensNoOp
 
@@ -72,12 +79,16 @@ final class APIParityTests: XCTestCase {
     func testPauseReturnsThePayloadImmediately() async {
         let request = URLRequest(url: URL(string: "https://x.test")!)
         let outcome = await BreakpointCoordinator.shared.pause(
-            .request(request), owner: UUID(), endpointKey: "GET /", timeout: 60
+            .request(request), owner: UUID(), exchangeID: UUID(), endpointKey: "GET /", timeout: 60
         )
 
         guard case .proceed(let payload) = outcome, case .request = payload else {
             return XCTFail("expected the payload back untouched")
         }
+
+        // Nothing is ever held here, so this has nothing to arm — it exists so
+        // the UI's call site compiles against the mirror.
+        await BreakpointCoordinator.shared.setAutoResumeEnabled(false, for: UUID())
     }
 
     func testPersistenceSurfaceCompilesAndWritesNothing() throws {

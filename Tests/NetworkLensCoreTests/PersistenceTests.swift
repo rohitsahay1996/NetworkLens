@@ -1,5 +1,75 @@
+//
+//  PersistenceTests.swift
+//  NetworkLensCoreTests
+//
+//  Created by Rohit Sahay on 30/07/26.
+//
+
 import XCTest
 @testable import NetworkLensCore
+
+/// Rules are built from real responses, so they are as sensitive as the traffic
+/// they came from — and they are the half that reaches disk.
+final class PersistedRuleRedactionTests: XCTestCase {
+
+    override func tearDown() {
+        Mocks.shared.removeAll()
+        NetworkLens.start(configuration: LensConfiguration())
+        super.tearDown()
+    }
+
+    private func secretRule() -> MockRule {
+        MockRule(
+            endpointKey: "POST /login",
+            response: .json(#"{"access_token":"super-secret-value","id":7}"#),
+            name: "logged in"
+        )
+    }
+
+    func testPersistedRulesAreRedactedByDefault() throws {
+        NetworkLens.start(configuration: LensConfiguration(redactor: DefaultRedactor()))
+        Mocks.shared.removeAll()
+        Mocks.shared.set(secretRule())
+
+        let saved = LensPersistence.shared.snapshot()
+        let body = try XCTUnwrap(saved.mocks.first?.steps.first?.response?.body)
+        let text = String(decoding: body, as: UTF8.self)
+
+        XCTAssertFalse(text.contains("super-secret-value"), "a token must not reach disk")
+        XCTAssertTrue(text.contains("\"id\""), "the rest of the payload has to survive")
+    }
+
+    /// The live rule keeps serving what was captured; only the copy that
+    /// persists is scrubbed.
+    func testRedactionDoesNotTouchTheRuleBeingServed() throws {
+        NetworkLens.start(configuration: LensConfiguration(redactor: DefaultRedactor()))
+        Mocks.shared.removeAll()
+        Mocks.shared.set(secretRule())
+
+        _ = LensPersistence.shared.snapshot()
+
+        let live = try XCTUnwrap(Mocks.shared.rule(forEndpointKey: "POST /login"))
+        let body = try XCTUnwrap(live.steps.first?.response?.body)
+        XCTAssertTrue(
+            String(decoding: body, as: UTF8.self).contains("super-secret-value"),
+            "the session must keep serving the real captured bytes"
+        )
+    }
+
+    func testRedactionOfPersistedRulesCanBeTurnedOff() throws {
+        NetworkLens.start(
+            configuration: LensConfiguration(
+                redactor: DefaultRedactor(), redactsPersistedRules: false
+            )
+        )
+        Mocks.shared.removeAll()
+        Mocks.shared.set(secretRule())
+
+        let saved = LensPersistence.shared.snapshot()
+        let body = try XCTUnwrap(saved.mocks.first?.steps.first?.response?.body)
+        XCTAssertTrue(String(decoding: body, as: UTF8.self).contains("super-secret-value"))
+    }
+}
 
 final class PersistenceTests: XCTestCase {
 

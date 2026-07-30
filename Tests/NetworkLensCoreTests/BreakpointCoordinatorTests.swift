@@ -1,3 +1,10 @@
+//
+//  BreakpointCoordinatorTests.swift
+//  NetworkLensCoreTests
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import XCTest
 @testable import NetworkLensCore
 
@@ -35,6 +42,7 @@ final class BreakpointCoordinatorTests: XCTestCase {
                 await coordinator.pause(
                     .request(self.makeRequest("/\(index)")),
                     owner: UUID(),
+                    exchangeID: UUID(),
                     endpointKey: "GET /\(index)",
                     timeout: 600
                 )
@@ -66,6 +74,7 @@ final class BreakpointCoordinatorTests: XCTestCase {
                 await coordinator.pause(
                     .request(self.makeRequest()),
                     owner: UUID(),
+                    exchangeID: UUID(),
                     endpointKey: "GET /\(index)",
                     timeout: 600
                 )
@@ -87,6 +96,7 @@ final class BreakpointCoordinatorTests: XCTestCase {
                 await coordinator.pause(
                     .request(self.makeRequest()),
                     owner: UUID(),
+                    exchangeID: UUID(),
                     endpointKey: "GET /\(index)",
                     timeout: 600
                 )
@@ -111,7 +121,7 @@ final class BreakpointCoordinatorTests: XCTestCase {
         let hold = Task {
             await coordinator.pause(
                 .request(self.makeRequest("/original")),
-                owner: UUID(), endpointKey: "GET /x", timeout: 600
+                owner: UUID(), exchangeID: UUID(), endpointKey: "GET /x", timeout: 600
             )
         }
         try await waitForPending(coordinator, count: 1)
@@ -130,7 +140,7 @@ final class BreakpointCoordinatorTests: XCTestCase {
         let hold = Task {
             await coordinator.pause(
                 .request(self.makeRequest()),
-                owner: UUID(), endpointKey: "GET /x", timeout: 600
+                owner: UUID(), exchangeID: UUID(), endpointKey: "GET /x", timeout: 600
             )
         }
         try await waitForPending(coordinator, count: 1)
@@ -154,7 +164,7 @@ final class BreakpointCoordinatorTests: XCTestCase {
         let first = Task {
             await coordinator.pause(
                 .request(self.makeRequest()),
-                owner: firstOwner, endpointKey: "GET /first", timeout: 600
+                owner: firstOwner, exchangeID: UUID(), endpointKey: "GET /first", timeout: 600
             )
         }
         try await waitForPending(coordinator, count: 1)
@@ -162,7 +172,7 @@ final class BreakpointCoordinatorTests: XCTestCase {
         let second = Task {
             await coordinator.pause(
                 .request(self.makeRequest()),
-                owner: secondOwner, endpointKey: "GET /second", timeout: 600
+                owner: secondOwner, exchangeID: UUID(), endpointKey: "GET /second", timeout: 600
             )
         }
         try await waitForPending(coordinator, count: 2)
@@ -189,7 +199,7 @@ final class BreakpointCoordinatorTests: XCTestCase {
         let hold = Task {
             await coordinator.pause(
                 .request(self.makeRequest()),
-                owner: UUID(), endpointKey: "GET /x", timeout: 600
+                owner: UUID(), exchangeID: UUID(), endpointKey: "GET /x", timeout: 600
             )
         }
         try await waitForPending(coordinator, count: 1)
@@ -201,6 +211,74 @@ final class BreakpointCoordinatorTests: XCTestCase {
 
         await coordinator.resumeAll()
         _ = await hold.value
+    }
+
+    // MARK: - Releasing from the traffic list
+
+    /// The queued hold is the one that matters here: it never gets a sheet, so
+    /// without a row-level release it is stopped with nothing on screen able to
+    /// start it again.
+    func testQueuedHoldIsReleasableByItsExchangeID() async throws {
+        let coordinator = BreakpointCoordinator()
+        let firstExchange = UUID()
+        let secondExchange = UUID()
+
+        let first = Task {
+            await coordinator.pause(
+                .request(self.makeRequest("/first")),
+                owner: UUID(), exchangeID: firstExchange,
+                endpointKey: "GET /first", timeout: 600
+            )
+        }
+        try await waitForPending(coordinator, count: 1)
+
+        let second = Task {
+            await coordinator.pause(
+                .request(self.makeRequest("/second")),
+                owner: UUID(), exchangeID: secondExchange,
+                endpointKey: "GET /second", timeout: 600
+            )
+        }
+        try await waitForPending(coordinator, count: 2)
+
+        var published: BreakpointCoordinator.PresentationState?
+        await coordinator.setStateObserver { state in published = state }
+        let held = try XCTUnwrap(published?.heldByExchangeID)
+        XCTAssertEqual(held.count, 2, "queued holds must be published too")
+
+        // Release the queued one while the other stays held.
+        await coordinator.resume(id: try XCTUnwrap(held[secondExchange]))
+        guard case .proceed = await second.value else {
+            return XCTFail("the queued hold should have been released")
+        }
+        let remaining = await coordinator.pendingCount
+        XCTAssertEqual(remaining, 1)
+
+        await coordinator.resumeAll()
+        _ = await first.value
+    }
+
+    /// Releasing from a row must not discard what was typed in the sheet.
+    func testResumeKeepsStagedEdits() async throws {
+        let coordinator = BreakpointCoordinator()
+        let exchangeID = UUID()
+        let hold = Task {
+            await coordinator.pause(
+                .request(self.makeRequest("/original")),
+                owner: UUID(), exchangeID: exchangeID,
+                endpointKey: "GET /x", timeout: 600
+            )
+        }
+        try await waitForPending(coordinator, count: 1)
+
+        let id = await coordinator.presented!.id
+        await coordinator.stageEdit(.request(makeRequest("/edited")), for: id)
+        await coordinator.resume(id: id)
+
+        guard case .proceed(.request(let delivered)) = await hold.value else {
+            return XCTFail("expected proceed")
+        }
+        XCTAssertEqual(delivered.url?.path, "/edited")
     }
 
     // MARK: - Auto-resume
@@ -221,12 +299,13 @@ final class BreakpointCoordinatorTests: XCTestCase {
 
     /// The acceptance criterion: the client gets a response, not a timeout.
     func testAutoResumeFiresBeforeTimeoutAndKeepsStagedEdits() async throws {
-        let coordinator = BreakpointCoordinator()
+        let clock = TestClock()
+        let coordinator = BreakpointCoordinator(clock: clock)
         // 2.5s timeout → auto-resume at 2s.
         let hold = Task {
             await coordinator.pause(
                 .request(self.makeRequest("/original")),
-                owner: UUID(), endpointKey: "GET /x", timeout: 2.5
+                owner: UUID(), exchangeID: UUID(), endpointKey: "GET /x", timeout: 2.5
             )
         }
         try await waitForPending(coordinator, count: 1)
@@ -236,6 +315,7 @@ final class BreakpointCoordinatorTests: XCTestCase {
         await coordinator.stageEdit(.request(makeRequest("/edited")), for: id)
 
         let started = Date()
+        try await clock.advance(by: 2, afterSleepers: 1)
         let outcome = await hold.value
         let elapsed = Date().timeIntervalSince(started)
 
@@ -246,6 +326,62 @@ final class BreakpointCoordinatorTests: XCTestCase {
         XCTAssertLessThan(elapsed, 2.5, "auto-resume must beat the app's own timeout")
         let actual9 = await coordinator.lastResumeReason
         XCTAssertEqual(actual9, .timedOut)
+    }
+
+    func testDisablingAutoResumeHoldsPastTheDeadline() async throws {
+        // Virtual time: the point is that nothing fires, and proving that by
+        // sleeping through a real deadline is both slow and unfalsifiable.
+        let clock = TestClock()
+        let coordinator = BreakpointCoordinator(clock: clock)
+        // 2.5s timeout → auto-resume would fire at 2s.
+        let hold = Task {
+            await coordinator.pause(
+                .request(self.makeRequest()),
+                owner: UUID(), exchangeID: UUID(), endpointKey: "GET /x", timeout: 2.5
+            )
+        }
+        try await waitForPending(coordinator, count: 1)
+
+        let id = await coordinator.presented!.id
+        await coordinator.setAutoResumeEnabled(false, for: id)
+        let disabled = await coordinator.presented!.isAutoResumeEnabled
+        XCTAssertFalse(disabled)
+
+        clock.advance(by: 10)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let stillHeld = await coordinator.pendingCount
+        XCTAssertEqual(stillHeld, 1, "a disarmed deadline must not release the request")
+
+        await coordinator.resolve(id: id, with: .proceed(.request(makeRequest())))
+        _ = await hold.value
+    }
+
+    /// Re-arming keeps the original deadline rather than granting a fresh
+    /// budget, so a deadline already in the past fires at once.
+    func testReenablingAfterTheDeadlineResumesImmediately() async throws {
+        let clock = TestClock()
+        let coordinator = BreakpointCoordinator(clock: clock)
+        let hold = Task {
+            await coordinator.pause(
+                .request(self.makeRequest()),
+                owner: UUID(), exchangeID: UUID(), endpointKey: "GET /x", timeout: 2.5
+            )
+        }
+        try await waitForPending(coordinator, count: 1)
+
+        let id = await coordinator.presented!.id
+        await coordinator.setAutoResumeEnabled(false, for: id)
+        clock.advance(by: 10)
+
+        await coordinator.setAutoResumeEnabled(true, for: id)
+        let started = Date()
+        _ = await hold.value
+        XCTAssertLessThan(
+            Date().timeIntervalSince(started), 1,
+            "the deadline had already passed, so re-arming must not wait again"
+        )
+        let reason = await coordinator.lastResumeReason
+        XCTAssertEqual(reason, .timedOut)
     }
 
     // MARK: - Resume all
@@ -259,7 +395,7 @@ final class BreakpointCoordinatorTests: XCTestCase {
         let hold = Task {
             await coordinator.pause(
                 .request(self.makeRequest()),
-                owner: UUID(), endpointKey: "GET /x", timeout: 600
+                owner: UUID(), exchangeID: UUID(), endpointKey: "GET /x", timeout: 600
             )
         }
         try await waitForPending(coordinator, count: 1)
