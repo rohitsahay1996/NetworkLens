@@ -1,3 +1,10 @@
+//
+//  BreakpointCoordinator.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// What is being held.
@@ -40,11 +47,20 @@ public actor BreakpointCoordinator {
         /// The `LensURLProtocol` instance that owns this. Used by
         /// `dismissPending(for:)` when the app cancels the task.
         public let owner: UUID
+        /// The recorded `NetworkExchange` this hold belongs to, so a traffic row
+        /// can tell it is the one stopped and offer to release it. Matching on
+        /// `endpointKey` instead would pick the wrong request the moment two
+        /// calls to the same endpoint are in flight.
+        public let exchangeID: UUID
         public let endpointKey: String
         public let payload: BreakpointPayload
         /// Wall-clock deadline at which we auto-resume with current edits.
         public let autoResumeAt: Date
         public let pausedAt: Date
+        /// Whether that deadline is armed. Turning it off holds the request
+        /// indefinitely from the tool's point of view — see
+        /// `setAutoResumeEnabled(_:for:)` for what the app still does.
+        public var isAutoResumeEnabled: Bool = true
 
         public var stage: EditRecord.Stage { payload.stage }
     }
@@ -67,13 +83,25 @@ public actor BreakpointCoordinator {
         /// 1-based position of the presented item, for "2 of 4".
         public var position: Int
         public var total: Int
+        /// Every held request keyed by its exchange id, presented and queued
+        /// alike. The traffic list needs the queued ones too: they are stopped
+        /// just as hard as the presented one, and they are the rows that read
+        /// as hung because nothing is on screen for them.
+        public var heldByExchangeID: [UUID: UUID]
 
         public static let empty = PresentationState(
-            presented: nil, queuedCount: 0, position: 0, total: 0
+            presented: nil, queuedCount: 0, position: 0, total: 0,
+            heldByExchangeID: [:]
         )
     }
 
-    public init() {}
+    /// Injected so auto-resume can be tested without waiting out a real
+    /// deadline. Defaults to whatever the lens is configured with.
+    private let clock: LensClock
+
+    public init(clock: LensClock? = nil) {
+        self.clock = clock ?? NetworkLens.clock
+    }
 
     // MARK: - Observation
 
@@ -87,7 +115,10 @@ public actor BreakpointCoordinator {
             presented: queue.first,
             queuedCount: max(0, queue.count - 1),
             position: queue.isEmpty ? 0 : 1,
-            total: queue.count
+            total: queue.count,
+            heldByExchangeID: Dictionary(
+                queue.map { ($0.exchangeID, $0.id) }, uniquingKeysWith: { first, _ in first }
+            )
         )
         stateObserver?(state)
     }
@@ -104,6 +135,7 @@ public actor BreakpointCoordinator {
     public func pause(
         _ payload: BreakpointPayload,
         owner: UUID,
+        exchangeID: UUID,
         endpointKey: String,
         timeout: TimeInterval
     ) async -> BreakpointOutcome {
@@ -112,10 +144,11 @@ public actor BreakpointCoordinator {
         let pending = Pending(
             id: id,
             owner: owner,
+            exchangeID: exchangeID,
             endpointKey: endpointKey,
             payload: payload,
-            autoResumeAt: Date().addingTimeInterval(budget),
-            pausedAt: Date()
+            autoResumeAt: clock.now.addingTimeInterval(budget),
+            pausedAt: clock.now
         )
 
         return await withTaskCancellationHandler {
@@ -140,8 +173,12 @@ public actor BreakpointCoordinator {
     }
 
     private func scheduleAutoResume(for id: UUID, after interval: TimeInterval) {
-        autoResumeTasks[id] = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+        autoResumeTasks[id] = Task { [weak self, clock] in
+            do {
+                try await clock.sleep(for: interval)
+            } catch {
+                return
+            }
             guard !Task.isCancelled else { return }
             guard let self else { return }
             await self.autoResume(id: id)
@@ -151,6 +188,33 @@ public actor BreakpointCoordinator {
     private func autoResume(id: UUID) {
         guard let staged = stagedEdits[id] else { return }
         resolve(id: id, with: .proceed(staged), reason: .timedOut)
+    }
+
+    /// Arms or disarms the auto-resume deadline for a held item.
+    ///
+    /// Disarming only stops *this tool* from releasing the request. The app's
+    /// own `timeoutIntervalForRequest` keeps running underneath and is not
+    /// extended, so a request held past it fails with `.timedOut` exactly as it
+    /// would have without the tool attached. That is the point of the switch:
+    /// watching the app's real timeout behaviour is a legitimate thing to test,
+    /// and the default deadline exists precisely to prevent it by accident.
+    ///
+    /// Re-arming keeps the original deadline rather than restarting the budget
+    /// — the timeout it was derived from has been running the whole time, so a
+    /// fresh window would be a window the app does not have. A deadline that
+    /// has already passed fires immediately.
+    public func setAutoResumeEnabled(_ enabled: Bool, for id: UUID) {
+        guard let index = queue.firstIndex(where: { $0.id == id }) else { return }
+        guard queue[index].isAutoResumeEnabled != enabled else { return }
+        queue[index].isAutoResumeEnabled = enabled
+
+        if enabled {
+            let remaining = max(0, queue[index].autoResumeAt.timeIntervalSince(clock.now))
+            scheduleAutoResume(for: id, after: remaining)
+        } else {
+            autoResumeTasks.removeValue(forKey: id)?.cancel()
+        }
+        publish()
     }
 
     // MARK: - Staging
@@ -183,6 +247,19 @@ public actor BreakpointCoordinator {
 
     /// Why the most recent release happened, so the UI can toast an auto-resume.
     public private(set) var lastResumeReason: ResumeReason?
+
+    /// Releases one held request, presented or queued, with whatever the UI has
+    /// staged for it.
+    ///
+    /// The play button on a traffic row: a queued hold has no payload on screen
+    /// to resume *with*, so the payload has to be looked up here rather than
+    /// passed in. Staged edits win over the original for the same reason
+    /// auto-resume keeps them — work already typed should not be thrown away by
+    /// releasing from somewhere else.
+    public func resume(id: UUID) {
+        guard let pending = queue.first(where: { $0.id == id }) else { return }
+        resolve(id: id, with: .proceed(stagedEdits[id] ?? pending.payload))
+    }
 
     /// Releases everything currently held, presented and queued, unedited
     /// except for whatever was already staged.

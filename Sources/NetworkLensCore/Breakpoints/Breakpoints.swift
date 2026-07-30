@@ -1,3 +1,10 @@
+//
+//  Breakpoints.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// The armed breakpoint set, plus the safety rules that govern it.
@@ -135,6 +142,17 @@ public final class Breakpoints: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return perturbationStorage.filter { $0.endpointKey == key }
+    }
+
+    /// Those actually rewriting this endpoint's traffic, in save order.
+    ///
+    /// Order matters and is deliberately the order they were saved: ops
+    /// compose, and two enabled perturbations touching the same path have to
+    /// resolve the same way on every hit or nothing is reproducible.
+    public func enabledPerturbations(forEndpointKey key: String) -> [Perturbation] {
+        lock.lock()
+        defer { lock.unlock() }
+        return perturbationStorage.filter { $0.endpointKey == key && $0.isEnabled }
     }
 
     /// Both clear on relaunch by default; this is what "keep active" skips.

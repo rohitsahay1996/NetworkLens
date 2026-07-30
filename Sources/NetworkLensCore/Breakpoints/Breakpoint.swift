@@ -1,3 +1,10 @@
+//
+//  Breakpoint.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// Which side of the exchange a breakpoint holds.
@@ -58,6 +65,13 @@ public struct Perturbation: Codable, Sendable, Hashable, Identifiable {
     public var name: String
     public var endpointKey: String
     public var ops: [PatchOp]
+    /// Whether this is currently rewriting traffic.
+    ///
+    /// Off by default. Saving a variant is how a tester builds a library of
+    /// them — "empty cart", "expired card" — and each one silently taking
+    /// effect the moment it is saved would make the library unusable and the
+    /// app's behaviour inexplicable.
+    public var isEnabled: Bool
     /// Set once someone has confirmed the app behaves correctly under it.
     public var qaVerified: Bool
     /// `JSONNode.shapeHash` of the response this was captured from, so a
@@ -70,6 +84,7 @@ public struct Perturbation: Codable, Sendable, Hashable, Identifiable {
         name: String,
         endpointKey: String,
         ops: [PatchOp],
+        isEnabled: Bool = false,
         qaVerified: Bool = false,
         verifiedAgainstShape: String? = nil,
         createdAt: Date = Date()
@@ -78,6 +93,7 @@ public struct Perturbation: Codable, Sendable, Hashable, Identifiable {
         self.name = name
         self.endpointKey = endpointKey
         self.ops = ops
+        self.isEnabled = isEnabled
         self.qaVerified = qaVerified
         self.verifiedAgainstShape = verifiedAgainstShape
         self.createdAt = createdAt
