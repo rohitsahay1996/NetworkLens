@@ -1,3 +1,10 @@
+//
+//  LensSnapshot.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 30/07/26.
+//
+
 import Foundation
 
 /// Everything worth carrying across a relaunch.

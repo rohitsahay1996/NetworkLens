@@ -1,3 +1,10 @@
+//
+//  ResponsePayload.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// A response and its body, carried together so a breakpoint can edit both

@@ -1,3 +1,10 @@
+//
+//  BodyReader.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// Reads request bodies, including stream-based ones, under a byte cap.

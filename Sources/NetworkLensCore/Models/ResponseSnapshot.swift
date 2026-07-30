@@ -1,3 +1,10 @@
+//
+//  ResponseSnapshot.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// An immutable capture of a response. Same truncation contract as

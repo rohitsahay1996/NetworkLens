@@ -1,3 +1,10 @@
+//
+//  RequestSnapshot.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// An immutable capture of an outgoing request, taken before it hits the wire.

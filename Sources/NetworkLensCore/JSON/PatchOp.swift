@@ -1,3 +1,10 @@
+//
+//  PatchOp.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// One edit instruction against a `JSONNode` tree.

@@ -1,3 +1,10 @@
+//
+//  FailureInfo.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// Why an exchange did not produce a usable success response.

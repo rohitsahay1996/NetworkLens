@@ -1,3 +1,10 @@
+//
+//  GraphQLMatcher.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// Identifies GraphQL operations by body field rather than by path.

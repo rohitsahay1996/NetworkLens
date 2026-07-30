@@ -1,3 +1,10 @@
+//
+//  JSONNodeSerializer.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// Writes a `JSONNode` back out, preserving entry order and number literals.

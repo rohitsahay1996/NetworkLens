@@ -1,3 +1,10 @@
+//
+//  JSONPointer.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// RFC 6901 JSON Pointer.

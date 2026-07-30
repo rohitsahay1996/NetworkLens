@@ -1,3 +1,10 @@
+//
+//  RequestMatcher.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// Turns a concrete request into a stable logical endpoint identity.

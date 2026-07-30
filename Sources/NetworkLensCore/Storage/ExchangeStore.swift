@@ -1,3 +1,10 @@
+//
+//  ExchangeStore.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// Bounded, thread-safe store of captured exchanges.

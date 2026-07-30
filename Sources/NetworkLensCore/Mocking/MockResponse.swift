@@ -1,3 +1,10 @@
+//
+//  MockResponse.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 30/07/26.
+//
+
 import Foundation
 
 /// The canned answer a `MockRule` serves in place of a network round trip.

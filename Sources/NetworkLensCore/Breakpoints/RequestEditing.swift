@@ -1,3 +1,10 @@
+//
+//  RequestEditing.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 30/07/26.
+//
+
 import Foundation
 
 /// Editing helpers for a held request.

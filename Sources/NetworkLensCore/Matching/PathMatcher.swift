@@ -1,3 +1,10 @@
+//
+//  PathMatcher.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// Default REST matcher. Collapses volatile path segments into `{id}` so

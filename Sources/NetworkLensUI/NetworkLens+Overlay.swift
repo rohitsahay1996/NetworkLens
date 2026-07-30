@@ -1,3 +1,10 @@
+//
+//  NetworkLens+Overlay.swift
+//  NetworkLensUI
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 // Re-exported so a host app has a single import for the whole umbrella API,

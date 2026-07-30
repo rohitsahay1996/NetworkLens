@@ -1,3 +1,10 @@
+//
+//  ScreenContext.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// The stack of screens currently on display, newest last.

@@ -1,3 +1,10 @@
+//
+//  RegexMatcher.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// Escape hatch for APIs whose paths do not follow the numeric/UUID convention

@@ -1,3 +1,10 @@
+//
+//  DefaultRedactor.swift
+//  NetworkLensCore
+//
+//  Created by Rohit Sahay on 29/07/26.
+//
+
 import Foundation
 
 /// Removes credentials and payment data before anything is stored.
