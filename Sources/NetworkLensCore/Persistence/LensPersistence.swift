@@ -66,6 +66,7 @@ public final class LensPersistence: @unchecked Sendable {
             mocks: mocks,
             breakpoints: Breakpoints.shared.all,
             perturbations: Breakpoints.shared.perturbations,
+            scenarios: Scenarios.shared.all,
             isMockingEnabled: Mocks.shared.isMockingEnabled
         )
     }
@@ -104,6 +105,7 @@ public final class LensPersistence: @unchecked Sendable {
         }
 
         Breakpoints.shared.replacePerturbations(snapshot.perturbations)
+        Scenarios.shared.replaceAll(snapshot.scenarios)
 
         guard keepingActiveRules else {
             Mocks.shared.clearForRelaunch()

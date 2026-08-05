@@ -21,6 +21,9 @@ public struct LensSnapshot: Codable, Sendable, Hashable {
     /// tester built on purpose and expects to find again — "the empty-cart
     /// perturbation" is a thing they name and reuse, not session state.
     public var perturbations: [Perturbation]
+    /// Saved setups across endpoints. Decoded leniently so a snapshot written
+    /// before scenarios existed still restores.
+    public var scenarios: [Scenario]
 
     /// The mocking master switch, so a session left "gone live" comes back
     /// that way instead of silently re-arming every rule at launch.
@@ -30,16 +33,44 @@ public struct LensSnapshot: Codable, Sendable, Hashable {
         mocks: [MockRule] = [],
         breakpoints: [Breakpoint] = [],
         perturbations: [Perturbation] = [],
+        scenarios: [Scenario] = [],
         isMockingEnabled: Bool = true
     ) {
         self.mocks = mocks
         self.breakpoints = breakpoints
         self.perturbations = perturbations
+        self.scenarios = scenarios
         self.isMockingEnabled = isMockingEnabled
     }
 
     public var isEmpty: Bool {
-        mocks.isEmpty && breakpoints.isEmpty && perturbations.isEmpty
+        mocks.isEmpty && breakpoints.isEmpty && perturbations.isEmpty && scenarios.isEmpty
+    }
+
+    // MARK: - Codable
+
+    /// Hand-written so every field added from here on decodes leniently.
+    ///
+    /// Synthesised `Codable` fails the whole snapshot when one key is absent,
+    /// which turns "the tool gained a feature" into "the tester lost their
+    /// rules". A snapshot written before scenarios existed has to restore.
+    private enum CodingKeys: String, CodingKey {
+        case mocks, breakpoints, perturbations, scenarios, isMockingEnabled
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            mocks: try container.decodeIfPresent([MockRule].self, forKey: .mocks) ?? [],
+            breakpoints: try container.decodeIfPresent([Breakpoint].self, forKey: .breakpoints) ?? [],
+            perturbations: try container.decodeIfPresent(
+                [Perturbation].self, forKey: .perturbations
+            ) ?? [],
+            scenarios: try container.decodeIfPresent([Scenario].self, forKey: .scenarios) ?? [],
+            isMockingEnabled: try container.decodeIfPresent(
+                Bool.self, forKey: .isMockingEnabled
+            ) ?? true
+        )
     }
 }
 

@@ -55,9 +55,10 @@ struct ExchangeDetailView: View {
             }
 
             CollapsibleSection(id: "Actions", title: "Actions", expanded: $expanded) {
-                // The switch belongs here, next to the response it changes —
-                // not only in the Mocks tab, which is a list of rules rather
-                // than of what the app is currently being told.
+                // Ungrouped: what the endpoint is doing right now, and the one
+                // control the whole loop runs through. Everything below is a
+                // change you make occasionally; these three are read and used
+                // on every pass.
                 if isEndpointMocked {
                     Toggle(isOn: Binding(
                         get: { lens.isServingMock(for: exchange) },
@@ -71,10 +72,6 @@ struct ExchangeDetailView: View {
                     }
                 }
 
-                // The switcher, inline rather than behind a sheet: flipping
-                // between empty, failed and loaded is the loop this whole
-                // feature exists to make fast, so it costs one tap from the
-                // response you are looking at.
                 if let rule = lens.rule(for: exchange), rule.variants.count > 1 {
                     Picker(
                         "Variant",
@@ -93,9 +90,6 @@ struct ExchangeDetailView: View {
                     }
                 }
 
-                // First action: with a variant switched, this is the whole
-                // loop — and it is the one that used to require leaving the
-                // screen and coming back.
                 Button {
                     lens.replay(exchange)
                     confirmation = "Replaying \(exchange.endpointKey)"
@@ -104,49 +98,83 @@ struct ExchangeDetailView: View {
                 }
                 .disabled(!lens.canReplay(exchange))
 
-                Button {
-                    editorMode = .add
-                    isMockEditorPresented = true
-                } label: {
-                    Label("Add a mock…", systemImage: "plus.square.on.square")
-                }
-                .disabled(exchange.response == nil)
-
-                if isEndpointMocked {
-                    Button {
-                        editorMode = .edit
+                // Grouped below, because the list had grown to eleven controls
+                // and the two that matter were somewhere in the middle of it.
+                DisclosureBlock(title: "Mocking", startsOpen: true) {
+                    ActionButton(
+                        title: "Add a mock…",
+                        icon: "plus.square.on.square",
+                        isEnabled: exchange.response != nil
+                    ) {
+                        editorMode = .add
                         isMockEditorPresented = true
-                    } label: {
-                        Label("Edit the active mock", systemImage: "square.on.square")
+                    }
+
+                    if isEndpointMocked {
+                        ActionButton(title: "Edit the active mock", icon: "square.on.square") {
+                            editorMode = .edit
+                            isMockEditorPresented = true
+                        }
+                    }
+
+                    // The one-tap version of the loading state, because that is
+                    // how it is nearly always wanted: pin this endpoint open and
+                    // go look at what the screen does.
+                    ActionButton(title: "Keep this endpoint loading", icon: "hourglass") {
+                        Mocks.shared.set(
+                            MockRule(
+                                endpointKey: exchange.endpointKey,
+                                steps: [.hang],
+                                name: "stuck loading"
+                            )
+                        )
+                        if !Mocks.shared.isMockingEnabled { Mocks.shared.setMockingEnabled(true) }
+                        confirmation = "\(exchange.endpointKey) will stay loading"
                     }
                 }
 
-                // The one-tap version of the loading state, because that is how
-                // it is nearly always wanted: pin this endpoint open and go
-                // look at what the screen does.
-                Button {
-                    Mocks.shared.set(
-                        MockRule(
-                            endpointKey: exchange.endpointKey,
-                            steps: [.hang],
-                            name: "stuck loading"
-                        )
-                    )
-                    if !Mocks.shared.isMockingEnabled { Mocks.shared.setMockingEnabled(true) }
-                    confirmation = "\(exchange.endpointKey) will stay loading"
-                } label: {
-                    Label("Keep this endpoint loading", systemImage: "hourglass")
+                DisclosureBlock(title: "Breakpoint") {
+                    // Toggles rather than disabling itself. A disabled button
+                    // says "you cannot do this", when what is true is "it is
+                    // already done" — and the way to undo it was a different tab.
+                    if isBreakpointArmed {
+                        ActionButton(
+                            title: "Remove breakpoint",
+                            icon: "pause.circle.fill",
+                            tint: .red
+                        ) {
+                            for breakpoint in lens.breakpoints
+                            where breakpoint.endpointKey == exchange.endpointKey {
+                                Breakpoints.shared.remove(id: breakpoint.id)
+                            }
+                            confirmation = "Breakpoint removed"
+                        }
+                    } else {
+                        ActionButton(title: "Break on this endpoint", icon: "pause.circle") {
+                            Breakpoints.shared.set(
+                                Breakpoint(endpointKey: exchange.endpointKey, stage: .response)
+                            )
+                            confirmation = "Breakpoint armed on \(exchange.endpointKey)"
+                        }
+                    }
                 }
 
-                Button {
-                    Breakpoints.shared.set(
-                        Breakpoint(endpointKey: exchange.endpointKey, stage: .response)
-                    )
-                    confirmation = "Breakpoint armed on \(exchange.endpointKey)"
-                } label: {
-                    Label("Break on this endpoint", systemImage: "pause.circle")
+                DisclosureBlock(title: "Share") {
+                    // Redacted by default. The unredacted form is a second,
+                    // differently-worded action rather than a default with a
+                    // warning: a copied command is on its way somewhere else.
+                    ActionButton(title: "Copy as cURL", icon: "doc.on.doc") {
+                        lens.copyCurl(for: exchange)
+                        confirmation = "Copied cURL"
+                    }
+
+                    if lens.canIncludeSecrets(in: exchange) {
+                        ActionButton(title: "Copy as cURL with secrets", icon: "key") {
+                            lens.copyCurl(for: exchange, secrets: .included)
+                            confirmation = "Copied with real headers"
+                        }
+                    }
                 }
-                .disabled(isBreakpointArmed)
             }
 
             CollapsibleSection(id: "Exchange", title: "Exchange", expanded: $expanded) {

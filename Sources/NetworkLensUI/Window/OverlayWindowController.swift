@@ -108,7 +108,7 @@ struct OverlayRootView: View {
     }
 }
 
-/// Tabs for the four inspector surfaces.
+/// Tabs for the inspector surfaces.
 struct InspectorView: View {
 
     @EnvironmentObject private var lens: LensObservable
@@ -121,6 +121,9 @@ struct InspectorView: View {
 
             tab { MockListView() }
                 .tabItem { Label("Mocks", systemImage: "square.on.square") }
+
+            tab { ScenarioListView() }
+                .tabItem { Label("Setups", systemImage: "square.stack.3d.down.right") }
 
             tab { BreakpointListView() }
                 .tabItem { Label("Breakpoints", systemImage: "pause.circle") }

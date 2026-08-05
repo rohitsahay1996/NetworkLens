@@ -88,6 +88,9 @@ final class PersistenceTests: XCTestCase {
     override func tearDown() {
         persistence.endAutosave()
         Mocks.shared.removeAll()
+        // These tests exercise the master switch, which is global. Leaving it
+        // off made unrelated suites fail depending on run order.
+        Mocks.shared.setMockingEnabled(true)
         Breakpoints.shared.clearForRelaunch()
         persistence = nil
         store = nil

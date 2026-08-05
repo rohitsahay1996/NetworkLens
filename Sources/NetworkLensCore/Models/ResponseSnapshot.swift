@@ -45,7 +45,17 @@ public struct ResponseSnapshot: Codable, Sendable, Hashable {
 
 extension ResponseSnapshot {
 
-    public init(response: HTTPURLResponse, body: Data?, bodyTruncated: Bool = false) {
+    /// - Parameter originalBodyByteCount: size before truncation. Defaults to
+    ///   the size of `body`, which is only correct when nothing was cut — a
+    ///   truncated capture that reports its own length says a 12 MB download was
+    ///   1 MB, and the one number that could have explained the truncation is
+    ///   gone.
+    public init(
+        response: HTTPURLResponse,
+        body: Data?,
+        bodyTruncated: Bool = false,
+        originalBodyByteCount: Int? = nil
+    ) {
         var headers: [String: String] = [:]
         for (key, value) in response.allHeaderFields {
             guard let key = key as? String else { continue }
@@ -56,7 +66,7 @@ extension ResponseSnapshot {
             headers: headers,
             body: body,
             bodyTruncated: bodyTruncated,
-            originalBodyByteCount: body?.count,
+            originalBodyByteCount: originalBodyByteCount ?? body?.count,
             mimeType: response.mimeType
         )
     }

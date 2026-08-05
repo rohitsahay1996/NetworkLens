@@ -151,8 +151,21 @@ public actor BreakpointCoordinator {
             pausedAt: clock.now
         )
 
+        // Cancellation can arrive before the continuation exists — a task
+        // cancelled the instant it reaches a breakpoint runs `onCancel` first,
+        // and `resolve` would then find nothing to resolve and return. The
+        // continuation registered a moment later would be one nobody ever
+        // resumes: the request hangs forever and the hold never leaves the
+        // queue. The box carries that ordering across the two closures, and
+        // dies with the call rather than accumulating on the actor.
+        let box = CancellationBox()
+
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
+                guard box.register() else {
+                    continuation.resume(returning: .proceed(payload))
+                    return
+                }
                 queue.append(pending)
                 continuations[id] = continuation
                 stagedEdits[id] = payload
@@ -161,7 +174,41 @@ public actor BreakpointCoordinator {
                 publish()
             }
         } onCancel: {
-            Task { await self.resolve(id: id, with: .proceed(payload), reason: .cancelled) }
+            // Registered already: the continuation is on the actor and only
+            // `resolve` can hand it back. Otherwise the box has recorded the
+            // cancellation and the body above resumes immediately.
+            if box.cancel() {
+                Task { await self.resolve(id: id, with: .proceed(payload), reason: .cancelled) }
+            }
+        }
+    }
+
+    /// Orders registration against cancellation for one `pause`.
+    ///
+    /// Both directions are answered exactly once: whichever call arrives first
+    /// gets `true`, the second gets `false` and does nothing.
+    private final class CancellationBox: @unchecked Sendable {
+
+        private let lock = NSLock()
+        private var isCancelled = false
+        private var isRegistered = false
+
+        /// True when the continuation should be stored — i.e. cancellation has
+        /// not already happened.
+        func register() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !isCancelled else { return false }
+            isRegistered = true
+            return true
+        }
+
+        /// True when there is a stored continuation to resolve.
+        func cancel() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            isCancelled = true
+            return isRegistered
         }
     }
 

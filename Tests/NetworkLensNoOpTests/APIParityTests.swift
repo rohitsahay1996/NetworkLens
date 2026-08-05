@@ -91,9 +91,87 @@ final class APIParityTests: XCTestCase {
         await BreakpointCoordinator.shared.setAutoResumeEnabled(false, for: UUID())
     }
 
+    /// Every field is named on purpose. The mirror once carried `PatchOp.Kind`
+    /// as set/remove/insert against Core's replace/remove/add and compiled fine,
+    /// because no call site here mentioned a case — so a release build using
+    /// `.replace` would have been the first thing to notice.
+    func testScenarioSurfaceCompilesAndAppliesNothing() {
+        let entry = Scenario.Entry(
+            endpointKey: "GET /cart",
+            match: MockMatch(query: ["page": "2"]),
+            variantID: UUID(),
+            variantName: "empty",
+            isEnabled: true
+        )
+        let scenario = Scenario(name: "checkout", entries: [entry])
+
+        Scenarios.shared.save(scenario)
+        let outcome = Scenarios.shared.apply(scenario)
+
+        XCTAssertTrue(Scenarios.shared.all.isEmpty)
+        XCTAssertNil(Scenarios.shared.applied())
+        XCTAssertEqual(outcome.applied, 0)
+        XCTAssertFalse(outcome.isComplete)
+        XCTAssertEqual(Scenario.capturing("x", from: []).entries.count, 0)
+    }
+
+    func testCurlExportSurfaceCompilesAndRendersNothing() {
+        let exchange = NetworkExchange(
+            endpointKey: "GET /users/{id}",
+            request: RequestSnapshot(method: "GET", url: URL(string: "https://x.test/users/1")!)
+        )
+
+        XCTAssertTrue(CurlExport.command(for: exchange).isEmpty)
+        XCTAssertTrue(CurlExport.command(for: exchange, secrets: .included).isEmpty)
+        XCTAssertTrue(CurlExport.command(for: [exchange], secrets: .redacted).isEmpty)
+    }
+
+    /// The integration surface a host's networking module touches. If any of
+    /// this stops compiling, a release build stops compiling.
+    func testIntegrationSurfaceCompiles() {
+        let configuration = URLSessionConfiguration.ephemeral
+
+        XCTAssertFalse(NetworkLens.install(into: configuration))
+        XCTAssertFalse(NetworkLens.canIntercept(configuration))
+        XCTAssertTrue(NetworkLens.uninterceptable.isEmpty)
+        XCTAssertEqual(LensHeaders.screen, "X-NetworkLens-Screen")
+
+        var request = URLRequest(url: URL(string: "https://x.test")!)
+        request.setValue("Checkout", forHTTPHeaderField: LensHeaders.screen)
+        XCTAssertEqual(request.value(forHTTPHeaderField: LensHeaders.screen), "Checkout")
+    }
+
+    /// Request mocking reaches a real server in the real build, so the mirror
+    /// has to expose it and do nothing.
+    func testRequestRewriteSurfaceCompilesAndRewritesNothing() {
+        let rewrite = MockRequestRewrite(
+            body: Data("{}".utf8),
+            headers: ["X-Debug": "1"],
+            removedHeaders: ["Authorization"],
+            method: "PUT"
+        )
+        let rule = MockRule(endpointKey: "POST /orders", steps: [.rewrite(rewrite)])
+
+        var request = URLRequest(url: URL(string: "https://x.test/orders")!)
+        request.httpBody = Data(#"{"real":true}"#.utf8)
+
+        XCTAssertEqual(rewrite.applied(to: request).httpBody, Data(#"{"real":true}"#.utf8))
+        XCTAssertNotNil(rule.steps.first?.rewrite)
+        XCTAssertTrue(NetworkLens.blockedRewrites.isEmpty)
+    }
+
+    func testPatchOpKindsMatchCore() {
+        XCTAssertEqual(
+            [PatchOp.Kind.replace, .remove, .add].map(\.rawValue),
+            ["replace", "remove", "add"]
+        )
+    }
+
     func testPersistenceSurfaceCompilesAndWritesNothing() throws {
         let store = FileSnapshotStore()
-        try store.save(LensSnapshot(mocks: [], breakpoints: [], perturbations: []))
+        try store.save(
+            LensSnapshot(mocks: [], breakpoints: [], perturbations: [], scenarios: [])
+        )
 
         XCTAssertNil(try store.load())
         XCTAssertFalse(LensPersistence.shared.persist())
@@ -131,6 +209,28 @@ final class APIParityTests: XCTestCase {
         XCTAssertTrue(request.queryItems.isEmpty)
         XCTAssertTrue(request.replacingHeader(name: "X", value: "1").queryItems.isEmpty)
         XCTAssertEqual(Data("{}".utf8).bodyPresentation(contentType: "application/json"), .empty)
+    }
+
+    /// The capture cap is now a real truncation rather than a flag, so the
+    /// mirror has to carry the same shape — a host that reads a captured body
+    /// must compile in a release build too.
+    func testResponseCaptureSurfaceCompiles() throws {
+        let response = try XCTUnwrap(
+            HTTPURLResponse(
+                url: URL(string: "https://x.test/big")!, statusCode: 200,
+                httpVersion: "HTTP/1.1", headerFields: [:]
+            )
+        )
+        let payload = ResponsePayload(response: response, body: Data(repeating: 0, count: 4_096))
+        let snapshot = payload.snapshot(cap: 64)
+
+        XCTAssertEqual(snapshot.statusCode, 200)
+        XCTAssertNil(snapshot.body, "the mirror captures nothing")
+        XCTAssertNil(
+            ResponseSnapshot(
+                response: response, body: Data(), bodyTruncated: true, originalBodyByteCount: 4_096
+            ).body
+        )
     }
 
     func testScreenAttributionSurfaceCompiles() {

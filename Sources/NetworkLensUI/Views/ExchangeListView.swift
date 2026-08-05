@@ -36,6 +36,17 @@ struct ExchangeListView: View {
                             }
                             .buttonStyle(.plain)
                             .foregroundStyle(Color.accentColor)
+
+                            // A screen's traffic as one block, which is the
+                            // unit a bug report is usually about.
+                            Button {
+                                lens.copyCurl(forScreen: group.screen)
+                            } label: {
+                                Label("Copy", systemImage: "doc.on.doc")
+                                    .font(.caption2)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Color.accentColor)
                         }
                     }
                 }
@@ -45,6 +56,18 @@ struct ExchangeListView: View {
         }
         .listStyle(.plain)
         .searchable(text: $query, prompt: "Endpoint, URL or screen")
+        // Whatever the tool decided on its own — a replay it could not send, an
+        // auto-resume it fired. Silence here is what makes a tester conclude the
+        // button is broken.
+        .alert(
+            Text(lens.notice ?? ""),
+            isPresented: Binding(
+                get: { lens.notice != nil },
+                set: { if !$0 { lens.notice = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { lens.notice = nil }
+        }
         .overlay {
             if results.isEmpty {
                 EmptyStateView(
@@ -132,6 +155,14 @@ struct ExchangeListView: View {
                 }
                 .tint(.blue)
             }
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button {
+                lens.copyCurl(for: exchange)
+            } label: {
+                Label("cURL", systemImage: "doc.on.doc")
+            }
+            .tint(.gray)
         }
     }
 

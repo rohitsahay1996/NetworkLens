@@ -92,6 +92,15 @@ public enum MockOutcome: Codable, Sendable, Hashable {
     /// Deliberately not given a delay: it is already the delay.
     case hang
 
+    /// Rewrites the outgoing request and lets it go to the real server.
+    ///
+    /// The one outcome that does not answer the request — the server still
+    /// does. Expressed as an outcome rather than a separate feature so it
+    /// composes with everything else: a script can rewrite the first attempt
+    /// and answer the second, and a variant switcher can flip between "send
+    /// what the app built" and "send this instead".
+    case rewrite(MockRequestRewrite)
+
     /// The response, or `nil` for a failure outcome.
     public var response: MockResponse? {
         if case .respond(let response) = self { return response }
@@ -109,12 +118,20 @@ public enum MockOutcome: Codable, Sendable, Hashable {
         return false
     }
 
+    /// The request rewrite, when this outcome changes what is sent rather than
+    /// answering it.
+    public var rewrite: MockRequestRewrite? {
+        if case .rewrite(let rewrite) = self { return rewrite }
+        return nil
+    }
+
     /// Latency this outcome imposes, whichever kind it is.
     public var delay: TimeInterval {
         switch self {
         case .respond(let response): return response.delay
         case .fail(let failure): return failure.delay
         case .hang: return 0
+        case .rewrite: return 0
         }
     }
 
@@ -136,7 +153,7 @@ public enum MockOutcome: Codable, Sendable, Hashable {
         case .fail(var failure):
             failure.delay = delay
             return .fail(failure)
-        case .hang:
+        case .hang, .rewrite:
             return self
         }
     }
@@ -154,6 +171,7 @@ public enum MockOutcome: Codable, Sendable, Hashable {
         case .respond(let response): return "\(response.statusCode)"
         case .fail(let failure): return failure.label
         case .hang: return "never answers"
+        case .rewrite(let rewrite): return "rewrite \(rewrite.summary ?? "nothing")"
         }
     }
 }

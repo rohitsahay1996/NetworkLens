@@ -29,8 +29,24 @@ public struct ResponsePayload: @unchecked Sendable {
         self.bodyTruncated = bodyTruncated
     }
 
-    public var snapshot: ResponseSnapshot {
-        ResponseSnapshot(response: response, body: body, bodyTruncated: bodyTruncated)
+    /// Capture of this response, retaining at most `cap` bytes of body.
+    ///
+    /// Truncation belongs here and not at the network leg: the app must still
+    /// receive every byte it asked for, and the cap is about what the ring
+    /// buffer holds on to. Without it, `maxCapturedResponseBodyBytes` sets a
+    /// flag and nothing else, and 500 retained exchanges of a multi-megabyte
+    /// download is a debugging tool running the app out of memory.
+    public func snapshot(cap: Int) -> ResponseSnapshot {
+        let limit = max(0, cap)
+        guard body.count > limit else {
+            return ResponseSnapshot(response: response, body: body, bodyTruncated: bodyTruncated)
+        }
+        return ResponseSnapshot(
+            response: response,
+            body: Data(body.prefix(limit)),
+            bodyTruncated: true,
+            originalBodyByteCount: body.count
+        )
     }
 
     /// Replaces the body and recomputes `Content-Length`.

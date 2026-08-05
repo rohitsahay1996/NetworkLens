@@ -136,7 +136,9 @@ public struct ResponsePayload: @unchecked Sendable {
         self.bodyTruncated = bodyTruncated
     }
 
-    public var snapshot: ResponseSnapshot { ResponseSnapshot(statusCode: response.statusCode) }
+    public func snapshot(cap: Int) -> ResponseSnapshot {
+        ResponseSnapshot(statusCode: response.statusCode)
+    }
     public func replacingBody(_ newBody: Data) -> ResponsePayload { self }
     public func replacingStatusCode(_ code: Int) -> ResponsePayload { self }
 }
@@ -460,6 +462,7 @@ public enum MockOutcome: Codable, Sendable, Hashable {
     case respond(MockResponse)
     case fail(MockFailure)
     case hang
+    case rewrite(MockRequestRewrite)
 
     public var response: MockResponse? {
         if case .respond(let response) = self { return response }
@@ -480,11 +483,16 @@ public enum MockOutcome: Codable, Sendable, Hashable {
         return false
     }
 
+    public var rewrite: MockRequestRewrite? {
+        if case .rewrite(let rewrite) = self { return rewrite }
+        return nil
+    }
+
     public var delay: TimeInterval {
         switch self {
         case .respond(let response): return response.delay
         case .fail(let failure): return failure.delay
-        case .hang: return 0
+        case .hang, .rewrite: return 0
         }
     }
 
@@ -493,6 +501,7 @@ public enum MockOutcome: Codable, Sendable, Hashable {
         case .respond(let response): return "\(response.statusCode)"
         case .fail(let failure): return failure.label
         case .hang: return "never answers"
+        case .rewrite(let rewrite): return "rewrite \(rewrite.summary ?? "nothing")"
         }
     }
 }
@@ -564,7 +573,7 @@ public struct MockVariant: Codable, Sendable, Hashable, Identifiable {
     public private(set) var variants: [MockVariant] = []
     public private(set) var activeVariantID: UUID = UUID()
     public var activeVariant: MockVariant {
-        get { MockVariant(name: name ?? "default", steps: steps, exhaustion: exhaustion) }
+        get { MockVariant(name: name, steps: steps, exhaustion: exhaustion) }
         set {}
     }
     public mutating func activate(variantID: UUID) {}
@@ -725,17 +734,20 @@ public struct LensSnapshot: Codable, Sendable, Hashable {
     public var mocks: [MockRule]
     public var breakpoints: [Breakpoint]
     public var perturbations: [Perturbation]
+    public var scenarios: [Scenario]
     public var isMockingEnabled: Bool
 
     public init(
         mocks: [MockRule] = [],
         breakpoints: [Breakpoint] = [],
         perturbations: [Perturbation] = [],
+        scenarios: [Scenario] = [],
         isMockingEnabled: Bool = true
     ) {
         self.mocks = mocks
         self.breakpoints = breakpoints
         self.perturbations = perturbations
+        self.scenarios = scenarios
         self.isMockingEnabled = isMockingEnabled
     }
 
@@ -842,4 +854,141 @@ public final class ReplayStore: @unchecked Sendable {
     public func canReplay(_ exchangeID: UUID) -> Bool { false }
     public func removeAll() {}
     public var count: Int { 0 }
+}
+
+/// Mirror of scenarios. Nothing is stored, so nothing can be applied.
+public struct Scenario: Codable, Sendable, Hashable, Identifiable {
+
+    public struct Entry: Codable, Sendable, Hashable {
+        public var endpointKey: String
+        public var match: MockMatch
+        public var variantID: UUID
+        public var variantName: String
+        public var isEnabled: Bool
+
+        public init(
+            endpointKey: String,
+            match: MockMatch = .any,
+            variantID: UUID,
+            variantName: String,
+            isEnabled: Bool = true
+        ) {
+            self.endpointKey = endpointKey
+            self.match = match
+            self.variantID = variantID
+            self.variantName = variantName
+            self.isEnabled = isEnabled
+        }
+    }
+
+    public let id: UUID
+    public var name: String
+    public var entries: [Entry]
+    public var createdAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        name: String,
+        entries: [Entry],
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.name = name
+        self.entries = entries
+        self.createdAt = createdAt
+    }
+
+    public var summary: String { "" }
+    public func matches(_ rules: [MockRule]) -> Bool { false }
+    public func resolve(against rules: [MockRule]) -> (applied: [MockRule], missing: [Entry]) {
+        ([], entries)
+    }
+
+    public static func capturing(
+        _ name: String,
+        from rules: [MockRule],
+        limitedTo endpointKeys: Set<String>? = nil
+    ) -> Scenario {
+        Scenario(name: name, entries: [])
+    }
+}
+
+public final class Scenarios: @unchecked Sendable {
+
+    public static let shared = Scenarios()
+
+    public struct Outcome: Sendable, Equatable {
+        public var applied: Int
+        public var missing: [Scenario.Entry]
+        public var isComplete: Bool { missing.isEmpty }
+    }
+
+    public struct ObservationToken: Sendable {
+        public func invalidate() {}
+    }
+
+    public init() {}
+
+    public var all: [Scenario] { [] }
+    public func applied(in mocks: Mocks = .shared) -> Scenario? { nil }
+    public func scenario(named name: String) -> Scenario? { nil }
+    public func save(_ scenario: Scenario) {}
+    public func remove(id: UUID) {}
+    public func removeAll() {}
+    public func replaceAll(_ scenarios: [Scenario]) {}
+    public func clearAppliedForRelaunch() {}
+
+    @discardableResult
+    public func apply(_ scenario: Scenario, to mocks: Mocks = .shared) -> Outcome {
+        Outcome(applied: 0, missing: scenario.entries)
+    }
+
+    public func addObserver(_ observer: @escaping @Sendable () -> Void) -> ObservationToken {
+        ObservationToken()
+    }
+}
+
+/// Mirror of cURL export. Nothing is captured in a release build, so there is
+/// nothing to render.
+public enum CurlExport {
+
+    public enum Secrets: Sendable {
+        case redacted
+        case included
+    }
+
+    public static func command(
+        for exchange: NetworkExchange,
+        secrets: Secrets = .redacted
+    ) -> String { "" }
+
+    public static func command(
+        for exchanges: [NetworkExchange],
+        secrets: Secrets = .redacted
+    ) -> String { "" }
+}
+
+/// Mirror of the request rewrite. Nothing is ever sent differently here.
+public struct MockRequestRewrite: Codable, Sendable, Hashable {
+
+    public var body: Data?
+    public var headers: [String: String]
+    public var removedHeaders: [String]
+    public var method: String?
+
+    public init(
+        body: Data? = nil,
+        headers: [String: String] = [:],
+        removedHeaders: [String] = [],
+        method: String? = nil
+    ) {
+        self.body = body
+        self.headers = headers
+        self.removedHeaders = removedHeaders
+        self.method = method
+    }
+
+    public var isEmpty: Bool { true }
+    public var summary: String? { nil }
+    public func applied(to request: URLRequest) -> URLRequest { request }
 }

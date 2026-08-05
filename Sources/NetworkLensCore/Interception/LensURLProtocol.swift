@@ -87,8 +87,16 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
         )
         outgoing = materialised.request
 
-        let screen = URLProtocol.property(forKey: Self.screenKey, in: request) as? String
+        // Header first: a networking module that cannot import the lens can
+        // still say which screen it is serving, and that is the most specific
+        // answer available. Then the stamped property, then the ambient stack.
+        let screen = outgoing.lensScreenHeader()
+            ?? URLProtocol.property(forKey: Self.screenKey, in: request) as? String
             ?? ScreenContext.shared.current
+
+        // Removed before anything else looks at the request, so it reaches
+        // neither the server nor the capture nor a curl export.
+        outgoing = outgoing.strippingLensHeaders()
         let exchangeID = URLProtocol.property(forKey: Self.exchangeIDKey, in: request) as? UUID
             ?? UUID()
         let startedAt = Date()
@@ -132,7 +140,7 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
                 endpointKey: exchange.endpointKey,
                 timeout: outgoing.timeoutInterval
             )
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else { return recordCancelled(exchange) }
 
             switch outcome {
             case .proceed(let edited):
@@ -157,9 +165,40 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
             }
         }
 
+        // --- Request rewrite ---------------------------------------------------
+        // The one outcome that reaches a real server, so it is the one with a
+        // guard: fabricated data sent to production can create real records,
+        // and no debugging convenience is worth that.
+        var rewriteRecorded = false
+        if let mock, let rewrite = mock.outcome.rewrite {
+            let host = outgoing.url?.host ?? ""
+            if configuration.isProductionHost(host) {
+                NetworkLens.noteBlockedRewrite(host: host, endpointKey: exchange.endpointKey)
+            } else if !rewrite.isEmpty {
+                let before = outgoing.httpBody
+                outgoing = rewrite.applied(to: outgoing)
+
+                var snapshot = RequestSnapshot(request: outgoing)
+                snapshot.bodyTruncated = requestSnapshot.bodyTruncated
+                exchange = exchange.replacingRequest(snapshot, source: .edited)
+                if let record = Self.editRecord(
+                    stage: .request, from: before, to: outgoing.httpBody
+                ) {
+                    exchange = exchange.loggingEdit(record)
+                }
+                NetworkLens.record(exchange)
+                rewriteRecorded = true
+            }
+        }
+
         // --- Network, or the mock in its place ---------------------------------
-        let result: Swift.Result<ResponsePayload, Error>
-        if let mock, mock.outcome.isHang {
+        let leg: NetworkLeg
+        if let mock, mock.outcome.rewrite != nil {
+            // Rewritten and sent: the server still answers. `rewriteRecorded`
+            // only says whether anything actually changed.
+            _ = rewriteRecorded
+            leg = await perform(outgoing)
+        } else if let mock, mock.outcome.isHang {
             // Answers nothing until told to. The exchange stays recorded in
             // flight so the row shows what the app is showing, and the client
             // is left untouched — whatever the app does about its own timeout
@@ -169,31 +208,51 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
 
             switch await hangUntilReleasedOrCancelled(exchangeID: exchange.id) {
             case .cancelled:
-                return
+                return recordCancelled(exchange)
             case .released:
                 // Resumes where it was suspended rather than synthesising a
                 // response: the loaded state has to be the server's, not the
                 // tool's invention.
                 exchange = exchange.resumedToNetwork()
-                result = await perform(outgoing, cap: configuration.maxCapturedResponseBodyBytes)
+                leg = await perform(outgoing)
             }
         } else if let mock {
             exchange = exchange.servedFromMock()
             NetworkLens.record(exchange)
-            result = await serve(mock, for: outgoing)
+            // A mocked 3xx is delivered as the response it is: following it
+            // would send the app to a real server, and a mock that reaches the
+            // network is no longer a mock.
+            leg = NetworkLeg(result: await serve(mock, for: outgoing), redirect: nil)
         } else {
-            result = await perform(outgoing, cap: configuration.maxCapturedResponseBodyBytes)
+            leg = await perform(outgoing)
         }
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else { return recordCancelled(exchange) }
 
         var payload: ResponsePayload
-        switch result {
+        switch leg.result {
         case .success(let received):
             payload = received
         case .failure(let error):
             exchange = exchange.failed(FailureInfo(error: error), timing: nil)
             NetworkLens.record(exchange)
             client?.urlProtocol(self, didFailWithError: error)
+            return
+        }
+
+        // --- Redirect ----------------------------------------------------------
+        // Handed back to the URL loading system rather than followed here, which
+        // is what puts the app's own `willPerformHTTPRedirection` back in the
+        // loop and gives each hop its own row. The system tears this instance
+        // down and starts the next request, which is intercepted like any other.
+        if let redirect = leg.redirect {
+            exchange = exchange.completed(
+                response: payload.snapshot(cap: configuration.maxCapturedResponseBodyBytes),
+                timing: payload.timing
+            )
+            NetworkLens.record(exchange)
+            client?.urlProtocol(
+                self, wasRedirectedTo: redirect.request, redirectResponse: redirect.response
+            )
             return
         }
 
@@ -212,7 +271,7 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
                 endpointKey: exchange.endpointKey,
                 timeout: outgoing.timeoutInterval
             )
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else { return recordCancelled(exchange) }
 
             switch outcome {
             case .proceed(let edited):
@@ -236,14 +295,35 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
             }
         }
 
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else { return recordCancelled(exchange) }
 
-        exchange = exchange.completed(response: payload.snapshot, timing: payload.timing)
+        exchange = exchange.completed(
+            response: payload.snapshot(cap: configuration.maxCapturedResponseBodyBytes),
+            timing: payload.timing
+        )
         NetworkLens.record(exchange)
 
         client?.urlProtocol(self, didReceive: payload.response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: payload.body)
         client?.urlProtocolDidFinishLoading(self)
+    }
+
+    // MARK: - Cancellation
+
+    /// Closes out an exchange whose task was cancelled.
+    ///
+    /// Every early return on cancellation used to leave the exchange exactly as
+    /// it was recorded on the way in — request only, no response, no failure —
+    /// which `isInFlight` reads as still running. A user navigating away
+    /// mid-request is ordinary behaviour, so the traffic list accumulated rows
+    /// that never resolved and `SessionStats.inFlight` counted them forever.
+    ///
+    /// Nothing is said to the client here on purpose: cancellation arrives
+    /// through `stopLoading`, after which `URLProtocol` forbids further
+    /// callbacks. This records what happened, it does not deliver it.
+    private func recordCancelled(_ exchange: NetworkExchange) {
+        guard exchange.isInFlight else { return }
+        NetworkLens.record(exchange.failed(FailureInfo(error: URLError(.cancelled))))
     }
 
     // MARK: - Mock
@@ -275,11 +355,12 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
                 response.payload(for: url, elapsed: Date().timeIntervalSince(startedAt))
             )
 
-        case .hang:
-            // Claimed before this point in `run()`, which returns without ever
-            // answering. Reaching here would mean a hang had been turned into
-            // some other outcome, so fail loudly rather than inventing one.
-            assertionFailure("a hanging outcome must be handled before serve(_:for:)")
+        case .hang, .rewrite:
+            // Both are handled in `run()` before this point — one never
+            // answers, the other lets the server answer. Reaching here would
+            // mean an outcome had been turned into something else, so fail
+            // loudly rather than inventing a response.
+            assertionFailure("hang and rewrite must be handled before serve(_:for:)")
             return .failure(URLError(.timedOut))
         }
     }
@@ -411,31 +492,35 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
 
     // MARK: - Passthrough
 
-    private func perform(
-        _ request: URLRequest, cap: Int
-    ) async -> Swift.Result<ResponsePayload, Error> {
+    /// One trip to the server, and whatever it asked for next.
+    private struct NetworkLeg {
+        let result: Swift.Result<ResponsePayload, Error>
+        /// Set when the server answered 3xx and the hop was not followed here.
+        let redirect: PassthroughObserver.Redirect?
+    }
+
+    /// Sends the real request. The body comes back whole — the app is entitled
+    /// to every byte of it, and `snapshot(cap:)` decides what is *kept*.
+    private func perform(_ request: URLRequest) async -> NetworkLeg {
         // The tag is what stops the recursion. Set on a mutable copy of the
         // request we are about to send, never on the one we were handed.
         let tagged = request.taggedAsHandled()
-        let collector = MetricsCollector()
+        let observer = PassthroughObserver()
         do {
             let (data, response) = try await PassthroughSession.shared.session.data(
-                for: tagged, delegate: collector
+                for: tagged, delegate: observer
             )
             guard let http = response as? HTTPURLResponse else {
-                return .failure(URLError(.badServerResponse))
+                return NetworkLeg(result: .failure(URLError(.badServerResponse)), redirect: nil)
             }
-            let truncated = data.count > cap
-            return .success(
-                ResponsePayload(
-                    response: http,
-                    body: data,
-                    timing: collector.timing,
-                    bodyTruncated: truncated
-                )
+            return NetworkLeg(
+                result: .success(
+                    ResponsePayload(response: http, body: data, timing: observer.timing)
+                ),
+                redirect: observer.offeredRedirect
             )
         } catch {
-            return .failure(error)
+            return NetworkLeg(result: .failure(error), redirect: nil)
         }
     }
 }
@@ -475,48 +560,3 @@ extension URLRequest {
     }
 }
 
-// MARK: - Passthrough session
-
-/// The session used for the real network leg.
-///
-/// Built without `LensURLProtocol` in its protocol list. The handled tag alone
-/// would be enough, but excluding the class as well means a bug in the tagging
-/// degrades to "not captured" rather than to an infinite loop.
-final class PassthroughSession: @unchecked Sendable {
-
-    static let shared = PassthroughSession()
-
-    let session: URLSession
-
-    private init() {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = (configuration.protocolClasses ?? [])
-            .filter { $0 != LensURLProtocol.self }
-        configuration.urlCache = nil
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        session = URLSession(configuration: configuration)
-    }
-}
-
-/// Collects `URLSessionTaskMetrics` for one task.
-final class MetricsCollector: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-
-    private let lock = NSLock()
-    private var collected: Timing?
-
-    var timing: Timing? {
-        lock.lock()
-        defer { lock.unlock() }
-        return collected
-    }
-
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        didFinishCollecting metrics: URLSessionTaskMetrics
-    ) {
-        lock.lock()
-        collected = Timing(metrics: metrics)
-        lock.unlock()
-    }
-}

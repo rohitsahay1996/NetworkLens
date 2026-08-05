@@ -60,7 +60,11 @@ extension NetworkLens {
     private static let replaySession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        install(into: configuration)
+        // Explicitly not adopted as the passthrough template: this
+        // configuration is the tool's own, and letting it stand in for the
+        // app's would hand every intercepted request an empty cookie jar the
+        // moment anyone replays anything.
+        install(into: configuration, adoptingForPassthrough: false)
         return URLSession(configuration: configuration)
     }()
 }

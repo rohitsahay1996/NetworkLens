@@ -55,12 +55,77 @@ public enum NetworkLens {
 
     /// Explicit install, for apps that build their own session configuration
     /// and would rather not be swizzled.
-    public static func install(into config: URLSessionConfiguration) {
+    ///
+    /// Also the moment the lens learns what the app's networking is actually
+    /// configured with. An intercepted request is re-sent on the lens's own
+    /// session, so cookies, additional headers, credentials and connectivity
+    /// settings come from that session rather than the app's — and anything it
+    /// does not have is dropped from every request while the tool is attached.
+    /// Installing explicitly copies the configuration for that leg, which is the
+    /// difference between the tool observing the app and the tool changing it.
+    @discardableResult
+    public static func install(into config: URLSessionConfiguration) -> Bool {
+        install(into: config, adoptingForPassthrough: true)
+    }
+
+    /// - Parameter adoptingForPassthrough: whether this configuration should
+    ///   also become the template for the real network leg. False for the
+    ///   swizzled `.default` / `.ephemeral` getters: those fire on every access
+    ///   from anywhere in the process, including from inside this tool, so the
+    ///   last one to run would decide the app's cookie jar at random.
+    @discardableResult
+    static func install(
+        into config: URLSessionConfiguration, adoptingForPassthrough: Bool
+    ) -> Bool {
+        // A background session runs its transfers in another process, where a
+        // custom `URLProtocol` is never consulted. Installing into one appears
+        // to work and then captures nothing — which reads as a broken tool
+        // rather than an unsupported configuration, so say so instead.
+        guard !isBackground(config) else {
+            state.noteUninterceptable("a background URLSessionConfiguration")
+            return false
+        }
+
+        if adoptingForPassthrough {
+            PassthroughSession.shared.adopt(config)
+        }
+
         var classes = config.protocolClasses ?? []
-        guard !classes.contains(where: { $0 == LensURLProtocol.self }) else { return }
+        guard !classes.contains(where: { $0 == LensURLProtocol.self }) else { return true }
         // First, or the system HTTP protocol claims the request before we see it.
         classes.insert(LensURLProtocol.self, at: 0)
         config.protocolClasses = classes
+        return true
+    }
+
+    /// Whether traffic on this configuration can be seen at all.
+    ///
+    /// Worth asking before wiring a session in a networking module: the answer
+    /// is no for background configurations, and no amount of setup changes it.
+    public static func canIntercept(_ config: URLSessionConfiguration) -> Bool {
+        !isBackground(config)
+    }
+
+    /// Rewrites refused because the host is production.
+    ///
+    /// Surfaced rather than silently skipped: a tester whose rewrite did
+    /// nothing needs to know it was refused, not conclude the tool is broken.
+    public static var blockedRewrites: [String] { state.blockedRewrites }
+
+    static func noteBlockedRewrite(host: String, endpointKey: String) {
+        state.noteBlockedRewrite("\(endpointKey) on \(host)")
+    }
+
+    /// Configurations the lens was asked to install into and could not.
+    ///
+    /// Surfaced rather than logged: a tester wondering why a screen shows no
+    /// traffic needs this on screen, and a developer wiring a new session needs
+    /// it in a test.
+    public static var uninterceptable: [String] { state.uninterceptable }
+
+    /// `identifier` is non-nil only for `background(withIdentifier:)`.
+    private static func isBackground(_ config: URLSessionConfiguration) -> Bool {
+        config.identifier != nil
     }
 
     /// Escape hatch for traffic `URLProtocol` cannot see — gRPC, raw sockets,
@@ -130,8 +195,34 @@ final class LensState: @unchecked Sendable {
     private var _isActive = false
     private var _chain = MatcherChain([PathMatcher()])
     private var _clock: LensClock = SystemClock()
+    private var _uninterceptable: [String] = []
+    private var _blockedRewrites: [String] = []
 
     let store = ExchangeStore()
+
+    var uninterceptable: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return _uninterceptable
+    }
+
+    var blockedRewrites: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return _blockedRewrites
+    }
+
+    func noteBlockedRewrite(_ description: String) {
+        lock.lock()
+        if !_blockedRewrites.contains(description) { _blockedRewrites.append(description) }
+        lock.unlock()
+    }
+
+    func noteUninterceptable(_ description: String) {
+        lock.lock()
+        if !_uninterceptable.contains(description) { _uninterceptable.append(description) }
+        lock.unlock()
+    }
 
     var clock: LensClock {
         get {

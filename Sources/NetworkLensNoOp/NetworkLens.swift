@@ -27,7 +27,14 @@ public enum NetworkLens {
 
     public static func start(configuration: LensConfiguration = .default) {}
 
-    public static func install(into config: URLSessionConfiguration) {}
+    @discardableResult
+    public static func install(into config: URLSessionConfiguration) -> Bool { false }
+
+    public static func canIntercept(_ config: URLSessionConfiguration) -> Bool { false }
+
+    public static var uninterceptable: [String] { [] }
+
+    public static var blockedRewrites: [String] { [] }
 
     public static func record(_ exchange: NetworkExchange) {}
 
@@ -284,7 +291,12 @@ public struct ResponseSnapshot: Codable, Sendable, Hashable {
         self.mimeType = mimeType
     }
 
-    public init(response: HTTPURLResponse, body: Data?, bodyTruncated: Bool = false) {
+    public init(
+        response: HTTPURLResponse,
+        body: Data?,
+        bodyTruncated: Bool = false,
+        originalBodyByteCount: Int? = nil
+    ) {
         self.init(statusCode: response.statusCode)
     }
 
@@ -563,4 +575,11 @@ public final class TestClock: LensClock, @unchecked Sendable {
     public func sleep(for interval: TimeInterval) async throws {}
     public func advance(by interval: TimeInterval) {}
     public func advance(by interval: TimeInterval, afterSleepers count: Int) async throws {}
+}
+
+/// Mirror of the header seam. A networking module can set these
+/// unconditionally; in a release build nothing reads them, and they are still
+/// stripped so a header the app never meant to send cannot escape.
+public enum LensHeaders {
+    public static let screen = "X-NetworkLens-Screen"
 }

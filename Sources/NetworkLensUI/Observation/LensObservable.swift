@@ -8,6 +8,9 @@
 import Foundation
 import Combine
 import NetworkLensCore
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// Bridges Core's lock-based stores to SwiftUI.
 ///
@@ -27,13 +30,17 @@ public final class LensObservable: ObservableObject {
     /// The breakpoint currently held, if any, and its queue position.
     @Published public private(set) var presentation = BreakpointPresentation.empty
 
-    /// Set when an auto-resume fired, so the UI can toast it. Cleared on read.
-    @Published public var autoResumeNotice: String?
+    /// One line the UI is expected to surface and then clear — an auto-resume
+    /// that fired, a replay that could not be sent. Anything the tool decided
+    /// on its own goes here rather than being dropped, because a tap that
+    /// silently does nothing reads as a broken tool.
+    @Published public var notice: String?
 
     private var storeToken: ExchangeStore.ObservationToken?
     private var breakpointToken: Breakpoints.ObservationToken?
     private var mocksToken: Mocks.ObservationToken?
     private var hangToken: HangingRequests.ObservationToken?
+    private var scenariosToken: Scenarios.ObservationToken?
 
     public init() {
         storeToken = NetworkLens.store.addObserver { [weak self] in
@@ -46,6 +53,9 @@ public final class LensObservable: ObservableObject {
             Task { @MainActor [weak self] in self?.revision &+= 1 }
         }
         hangToken = HangingRequests.shared.addObserver { [weak self] in
+            Task { @MainActor [weak self] in self?.revision &+= 1 }
+        }
+        scenariosToken = Scenarios.shared.addObserver { [weak self] in
             Task { @MainActor [weak self] in self?.revision &+= 1 }
         }
         Task { await self.attachToCoordinator() }
@@ -133,7 +143,13 @@ public final class LensObservable: ObservableObject {
     /// Fires a captured request again. Fire-and-forget: the new exchange
     /// arrives through the store like any other.
     public func replay(_ exchange: NetworkExchange) {
-        Task { try? await NetworkLens.replay(exchange) }
+        Task { [weak self] in
+            do {
+                _ = try await NetworkLens.replay(exchange)
+            } catch {
+                self?.notice = Self.replayFailureMessage(for: exchange, error: error)
+            }
+        }
     }
 
     /// Re-fires every replayable request a screen made, in the order it made
@@ -147,11 +163,122 @@ public final class LensObservable: ObservableObject {
             .filter { ($0.screen ?? "Unattributed") == screen && NetworkLens.canReplay($0) }
             .reversed()
 
-        Task {
+        Task { [weak self] in
+            var failures: [NetworkExchange] = []
             for exchange in group {
-                try? await NetworkLens.replay(exchange)
+                do {
+                    _ = try await NetworkLens.replay(exchange)
+                } catch {
+                    // One unavailable request does not stop the rest: the
+                    // interleaving is the reason for replaying a whole screen,
+                    // and losing the oldest call is no reason to lose it.
+                    failures.append(exchange)
+                }
             }
+            guard let first = failures.first else { return }
+            self?.notice = failures.count == 1
+                ? Self.replayFailureMessage(
+                    for: first, error: NetworkLens.ReplayError.originalRequestUnavailable
+                )
+                : "\(failures.count) of \(group.count) requests could not be replayed — "
+                    + "their originals have been evicted from the replay buffer."
         }
+    }
+
+    private static func replayFailureMessage(
+        for exchange: NetworkExchange, error: Error
+    ) -> String {
+        guard case NetworkLens.ReplayError.originalRequestUnavailable = error else {
+            return "\(exchange.endpointKey) could not be replayed: "
+                + error.localizedDescription
+        }
+        // The one error `replay` throws, and the one worth explaining: the
+        // unredacted request is kept in memory only and is evicted by newer
+        // traffic, so the button was live a moment ago and is not now.
+        return "\(exchange.endpointKey) can no longer be replayed — the original "
+            + "request has been evicted by newer traffic."
+    }
+
+    // MARK: - Export
+
+    /// Puts a `curl` command on the pasteboard.
+    ///
+    /// Redacted unless asked otherwise: a copied command is on its way into a
+    /// ticket or a chat, which is where a token must not go.
+    public func copyCurl(
+        for exchange: NetworkExchange, secrets: CurlExport.Secrets = .redacted
+    ) {
+        copyToPasteboard(CurlExport.command(for: exchange, secrets: secrets))
+    }
+
+    /// Every request a screen made, oldest first, as one block.
+    public func copyCurl(forScreen screen: String) {
+        let group = exchanges
+            .filter { ($0.screen ?? "Unattributed") == screen }
+            .reversed()
+        copyToPasteboard(CurlExport.command(for: Array(group)))
+    }
+
+    /// The package also builds for macOS, where `UIPasteboard` does not exist.
+    private func copyToPasteboard(_ text: String) {
+        #if canImport(UIKit)
+        UIPasteboard.general.string = text
+        #endif
+    }
+
+    /// Whether the unredacted request is still around to export.
+    public func canIncludeSecrets(in exchange: NetworkExchange) -> Bool {
+        _ = revision
+        return NetworkLens.canReplay(exchange)
+    }
+
+    // MARK: - Scenarios
+
+    public var scenarios: [Scenario] {
+        _ = revision
+        return Scenarios.shared.all
+    }
+
+    /// The setup currently in force, if the rules still say so.
+    public var appliedScenario: Scenario? {
+        _ = revision
+        return Scenarios.shared.applied()
+    }
+
+    /// Saves the current selection across every mocked endpoint, or just the
+    /// ones a screen touched.
+    @discardableResult
+    public func saveScenario(named name: String, forScreen screen: String? = nil) -> Scenario {
+        let keys: Set<String>? = screen.map { screen in
+            Set(
+                exchanges
+                    .filter { ($0.screen ?? "Unattributed") == screen }
+                    .map(\.endpointKey)
+            )
+        }
+        let scenario = Scenario.capturing(name, from: Mocks.shared.all, limitedTo: keys)
+        Scenarios.shared.save(scenario)
+        return scenario
+    }
+
+    /// Applies a saved setup, reporting what it could not reach.
+    @discardableResult
+    public func applyScenario(_ scenario: Scenario) -> Scenarios.Outcome {
+        Scenarios.shared.apply(scenario)
+    }
+
+    public func removeScenario(_ scenario: Scenario) {
+        Scenarios.shared.remove(id: scenario.id)
+    }
+
+    /// The endpoints a screen hit, for scoping a scenario to it.
+    public func endpointKeys(forScreen screen: String) -> Set<String> {
+        _ = revision
+        return Set(
+            exchanges
+                .filter { ($0.screen ?? "Unattributed") == screen }
+                .map(\.endpointKey)
+        )
     }
 
     /// The rule answering this endpoint, if any.

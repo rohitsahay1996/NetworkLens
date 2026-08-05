@@ -32,6 +32,70 @@ final class BreakpointCoordinatorTests: XCTestCase {
         }
     }
 
+    /// Runs `work`, giving up after `timeout` rather than hanging the suite —
+    /// the failure being tested for is a request that never comes back.
+    private func withDeadline<T: Sendable>(
+        _ timeout: TimeInterval, _ work: @escaping @Sendable () async -> T
+    ) async -> T? {
+        await withTaskGroup(of: T?.self) { group in
+            group.addTask { await work() }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+    }
+
+    // MARK: - Cancellation
+
+    /// A task cancelled before it reaches the breakpoint runs the cancellation
+    /// handler first, so `resolve` found no continuation and returned. The
+    /// continuation registered a moment later was then one nobody could resume:
+    /// the request hung forever and the hold never left the queue.
+    func testPauseCancelledBeforeItRegistersStillReturns() async throws {
+        let coordinator = BreakpointCoordinator()
+
+        let hold = Task {
+            await coordinator.pause(
+                .request(self.makeRequest()),
+                owner: UUID(), exchangeID: UUID(), endpointKey: "GET /x", timeout: 600
+            )
+        }
+        // Before the task body has had a chance to run, which is the ordering
+        // that used to strand it.
+        hold.cancel()
+
+        let outcome = await withDeadline(5) { await hold.value }
+        XCTAssertNotNil(outcome, "a pause cancelled before registering must not hang")
+        if case .abort = outcome {
+            XCTFail("cancellation proceeds with the unedited payload, it does not abort")
+        }
+        let pending = await coordinator.pendingCount
+        XCTAssertEqual(pending, 0, "nothing may be left holding the queue")
+    }
+
+    /// The ordinary direction — cancelled while genuinely held — still resolves
+    /// through the actor and clears the queue.
+    func testPauseCancelledWhileHeldIsReleased() async throws {
+        let coordinator = BreakpointCoordinator()
+
+        let hold = Task {
+            await coordinator.pause(
+                .request(self.makeRequest()),
+                owner: UUID(), exchangeID: UUID(), endpointKey: "GET /x", timeout: 600
+            )
+        }
+        try await waitForPending(coordinator, count: 1)
+        hold.cancel()
+
+        let outcome = await withDeadline(5) { await hold.value }
+        XCTAssertNotNil(outcome)
+        try await waitForPending(coordinator, count: 0)
+    }
+
     // MARK: - Queueing
 
     func testFourConcurrentPausesQueueAndPresentOneAtATime() async throws {

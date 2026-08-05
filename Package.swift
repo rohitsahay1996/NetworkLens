@@ -7,11 +7,18 @@ let package = Package(
     // with no simulator and no host app. Core must never require UIKit.
     platforms: [.iOS(.v15), .macOS(.v12)],
     products: [
+        // What an app should link. Resolves to the real tool or the inert
+        // mirror by build configuration, so `import NetworkLens` is written
+        // once and never edited again.
+        .library(name: "NetworkLens", targets: ["NetworkLens"]),
+        // Linked directly by teams that need the release binary to provably
+        // contain nothing, and by anyone wiring the pieces themselves.
         .library(name: "NetworkLensCore", targets: ["NetworkLensCore"]),
         .library(name: "NetworkLensUI", targets: ["NetworkLensUI"]),
         .library(name: "NetworkLensNoOp", targets: ["NetworkLensNoOp"]),
     ],
     targets: [
+        .target(name: "NetworkLens", dependencies: ["NetworkLensUI", "NetworkLensNoOp"]),
         .target(name: "NetworkLensCore"),
         .target(name: "NetworkLensUI", dependencies: ["NetworkLensCore"]),
         .target(name: "NetworkLensNoOp"),

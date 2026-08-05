@@ -138,6 +138,9 @@ struct MockRuleEditor: View {
     @State var rule: MockRule
     @EnvironmentObject private var lens: LensObservable
     @Environment(\.dismiss) private var dismiss
+    /// One open at a time: several expanded rows of body text turn the list
+    /// into a wall and hide the thing being compared against.
+    @State private var expandedVariantID: UUID?
 
     init(rule: MockRule) { _rule = State(initialValue: rule) }
 
@@ -153,57 +156,50 @@ struct MockRuleEditor: View {
 
                 Section {
                     ForEach(rule.variants) { variant in
-                        Button {
-                            rule.activate(variantID: variant.id)
-                        } label: {
-                            HStack {
-                                Image(
-                                    systemName: variant.id == rule.activeVariantID
-                                        ? "largecircle.fill.circle" : "circle"
-                                )
-                                .foregroundStyle(
-                                    variant.id == rule.activeVariantID ? Color.accentColor : .secondary
-                                )
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(variant.name)
-                                    Text(variant.steps.map(\.label).joined(separator: " → "))
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Spacer(minLength: 0)
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
+                        VariantEditorRow(
+                            variant: variant,
+                            isActive: variant.id == rule.activeVariantID,
+                            isExpanded: expandedVariantID == variant.id,
+                            select: { rule.activate(variantID: variant.id) },
+                            toggleExpanded: {
+                                expandedVariantID = expandedVariantID == variant.id
+                                    ? nil : variant.id
+                            },
+                            update: { rule.updateVariant($0) }
+                        )
                     }
                     .onDelete { offsets in
                         for index in offsets { rule.removeVariant(id: rule.variants[index].id) }
                     }
 
-                    TextField("Rename the selected variant", text: Binding(
-                        get: { rule.name ?? "" },
-                        set: { rule.name = $0.isEmpty ? nil : $0 }
-                    ))
-
                     Button {
-                        // Copies the one on screen rather than starting blank:
-                        // a new variant is nearly always "this, but with one
-                        // field changed".
-                        var copy = rule.activeVariant
-                        copy = MockVariant(
-                            name: "\(copy.name) copy",
-                            steps: copy.steps,
-                            exhaustion: copy.exhaustion,
-                            requestSample: copy.requestSample
+                        let new = MockVariant(
+                            name: "new variant",
+                            steps: [
+                                .respond(
+                                    MockResponse(
+                                        statusCode: 200,
+                                        headers: ["Content-Type": "application/json"],
+                                        body: Data("{}".utf8)
+                                    )
+                                )
+                            ]
                         )
-                        rule.addVariant(copy)
+                        // Added without arming it. A blank `{}` becoming the
+                        // served answer the instant someone reaches for "add"
+                        // would change what the app sees before they had typed
+                        // anything.
+                        rule.addVariant(new, activate: false)
+                        // Opened instead, because the next thing anyone wants
+                        // is the fields.
+                        expandedVariantID = new.id
                     } label: {
-                        Label("Duplicate this variant", systemImage: "plus.square.on.square")
+                        Label("Add a variant", systemImage: "plus.circle")
                     }
                 } header: {
                     Text("Variants")
                 } footer: {
-                    Text("One endpoint, several named answers, one active. The script below belongs to the selected variant — switching rewinds it to its first step.")
+                    Text("One endpoint, several named answers, one active. Tap a row to open it and edit its status, body and latency in place; tap the circle to arm it. The Script section below belongs to whichever is armed.")
                 }
 
                 Section {
@@ -228,6 +224,11 @@ struct MockRuleEditor: View {
                         }
                         Divider()
                         Button("Never respond — stay loading") { rule.steps.append(.hang) }
+                        Button("Rewrite the request, then send it") {
+                            rule.steps.append(
+                                .rewrite(MockRequestRewrite(body: Data("{}".utf8)))
+                            )
+                        }
                     } label: {
                         Label("Add step", systemImage: "plus.circle")
                     }
@@ -343,6 +344,9 @@ struct MockStepRow: View {
 
     private var title: String {
         if step.isHang { return "Never answers — stays loading" }
+        if let rewrite = step.rewrite {
+            return "Sends a rewritten request · \(rewrite.summary ?? "no change")"
+        }
         if let failure = step.failure { return failure.label }
         guard let response = step.response else { return "—" }
         let size = response.body.isEmpty ? "empty" : formatBytes(response.body.count)
@@ -351,11 +355,15 @@ struct MockStepRow: View {
 
     private var icon: String {
         if step.isHang { return "hourglass" }
+        if step.rewrite != nil { return "arrow.up.circle" }
         return step.failure == nil ? "arrow.down.circle" : "bolt.horizontal.circle"
     }
 
     private var tint: Color {
         if step.isHang { return .orange }
+        // Orange, like the hang: both are states that need a second look, and
+        // this one reaches a real server.
+        if step.rewrite != nil { return .orange }
         return step.failure == nil ? .green : .red
     }
 }

@@ -92,13 +92,13 @@ extension URLSessionConfiguration {
     /// reaches the original getter.
     @objc class var lens_default: URLSessionConfiguration {
         let configuration = URLSessionConfiguration.lens_default
-        NetworkLens.install(into: configuration)
+        NetworkLens.install(into: configuration, adoptingForPassthrough: false)
         return configuration
     }
 
     @objc class var lens_ephemeral: URLSessionConfiguration {
         let configuration = URLSessionConfiguration.lens_ephemeral
-        NetworkLens.install(into: configuration)
+        NetworkLens.install(into: configuration, adoptingForPassthrough: false)
         return configuration
     }
 }
