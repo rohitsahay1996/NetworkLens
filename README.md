@@ -38,15 +38,17 @@ Swift Package Manager:
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "<your-remote>/NetworkLens.git", from: "1.0.0")
+    .package(url: "https://github.com/rohitsahay1996/NetworkLens.git", from: "1.0.0")
 ]
 
 // Your app target
 .product(name: "NetworkLens", package: "NetworkLens")
 ```
 
-In Xcode: **File → Add Package Dependencies…**, then add the **NetworkLens**
-library to your **app target** (not to your networking module — see below).
+In Xcode: **File → Add Package Dependencies…**, paste
+`https://github.com/rohitsahay1996/NetworkLens.git`, then add the
+**NetworkLens** library to your **app target** (not to your networking
+module — see below).
 
 ---
 
