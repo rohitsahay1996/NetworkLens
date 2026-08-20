@@ -26,6 +26,8 @@ public final class LensPersistence: @unchecked Sendable {
 
     private var mocksToken: Mocks.ObservationToken?
     private var breakpointsToken: Breakpoints.ObservationToken?
+    private var scenariosToken: Scenarios.ObservationToken?
+    private var lifecycleObservers: [NSObjectProtocol] = []
 
     public init(store: LensSnapshotStore = FileSnapshotStore()) {
         self.store = store
@@ -137,14 +139,66 @@ public final class LensPersistence: @unchecked Sendable {
 
         mocksToken = Mocks.shared.addObserver { [weak self] in self?.scheduleSave() }
         breakpointsToken = Breakpoints.shared.addObserver { [weak self] in self?.scheduleSave() }
+        // Scenarios were in `snapshot()` and in `restore(keepingActiveRules:)`
+        // but not here, so a saved setup only ever reached disk if a mock or a
+        // breakpoint happened to change afterwards. Saving something and having
+        // it silently not be saved is the worst failure this class has.
+        scenariosToken = Scenarios.shared.addObserver { [weak self] in self?.scheduleSave() }
+        observeLifecycle()
     }
 
     public func endAutosave() {
         mocksToken = nil
         breakpointsToken = nil
+        // A struct token with no `deinit`, unlike the other two — dropping the
+        // reference deregisters nothing.
+        scenariosToken?.invalidate()
+        scenariosToken = nil
+
+        for observer in lifecycleObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        lifecycleObservers = []
+
         lock.lock()
         isAutosaving = false
         lock.unlock()
+    }
+
+    // MARK: - Lifecycle
+
+    /// Names spelled out rather than taken from `UIApplication`.
+    ///
+    /// Core is Foundation-only so it can be driven headlessly, and importing
+    /// UIKit here to reach two string constants would end that. They are stable
+    /// Objective-C names; on a platform that never posts them this is inert.
+    private static let backgroundNotification =
+        Notification.Name("UIApplicationDidEnterBackgroundNotification")
+    private static let terminateNotification =
+        Notification.Name("UIApplicationWillTerminateNotification")
+
+    /// Writes the current state before the app goes away.
+    ///
+    /// Autosave is asynchronous, so a rule edited and immediately followed by
+    /// a kill could still be in flight. This is the seam where "I changed a
+    /// mock, killed the app, and it was gone" comes from.
+    private func observeLifecycle() {
+        lifecycleObservers = [Self.backgroundNotification, Self.terminateNotification].map { name in
+            NotificationCenter.default.addObserver(
+                forName: name, object: nil, queue: nil
+            ) { [weak self] _ in
+                self?.persistNow()
+            }
+        }
+    }
+
+    /// Drains anything already queued, then writes the state as it is now.
+    ///
+    /// In that order: a queued write carries an older snapshot, and letting it
+    /// land after the synchronous one would put the stale copy on disk.
+    public func persistNow() {
+        flush()
+        persist()
     }
 
     private func scheduleSave() {

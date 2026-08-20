@@ -9,14 +9,23 @@
 import SwiftUI
 import NetworkLensCore
 
-/// Session totals, the endpoints doing the most work, and where failures land.
+/// What this session talked to, how much, and where it went wrong.
+///
+/// The host filter leads because it is the only thing on this screen that is a
+/// control rather than a reading, and because it is what someone opens this tab
+/// to *do*. The totals below it are unfiltered on purpose: hiding a host is a
+/// statement about the traffic list, not a claim that the requests never
+/// happened.
 struct SessionStatsView: View {
 
     @EnvironmentObject private var lens: LensObservable
+    @ObservedObject private var filter = HostFilter.shared
 
     var body: some View {
         List {
-            Section("Session") {
+            HostFilterSection(filter: filter)
+
+            Section("Totals") {
                 LabelledRow(label: "Requests", value: "\(stats.totalRequests)")
                 LabelledRow(label: "In flight", value: "\(stats.inFlightCount)")
                 LabelledRow(label: "Failures", value: "\(stats.totalFailures)")
@@ -71,13 +80,13 @@ struct SessionStatsView: View {
         .overlay {
             if stats.totalRequests == 0 {
                 EmptyStateView(
-                    title: "Nothing to report",
-                    message: "Stats fill in as the app makes requests.",
+                    title: "Nothing yet",
+                    message: "Hosts and totals fill in as the app makes requests.",
                     systemImage: "chart.bar"
                 )
             }
         }
-        .navigationTitle("Stats")
+        .navigationTitle("Session")
     }
 
     private var stats: SessionStats { lens.stats }

@@ -568,7 +568,8 @@ If step 2 never happens, see the next section.
 | `WKWebView` requests missing | Out of `URLProtocol`'s reach | Not supported — see below |
 | Mocks not served | Master switch off, or rule disabled | Mocks tab → *Mocking enabled*; the bubble turns purple when mocks are serving |
 | Bubble never appears | `.networkLensOverlay()` missing, or no active scene | Attach it, or call `attachOverlay(to:)` from the scene delegate |
-| Rules vanish on relaunch | Default behaviour | `LensConfiguration(persistsRules: true)` |
+| Mocks vanish on relaunch | Default behaviour, and `persistsRules` alone is not enough | `LensConfiguration(keepBreakpointsAcrossLaunches: true, persistsRules: true)` — the first decides what may come back *armed*, the second whether anything is written at all |
+| Mocks come back but behave differently | `redactsPersistedRules` scrubbed the token out of the saved copy | `redactsPersistedRules: false`, deliberately — the rule then lands on disk carrying whatever the response carried |
 | Auth fails only with the lens attached | The real leg is not carrying your session's cookies or headers | `NetworkLens.install(into:)` with the configuration your app actually uses — it is copied for that leg |
 | A captured body is cut short | Longer than `maxCapturedResponseBodyBytes` | Expected: the app received it whole, the capture keeps a prefix and reports `originalBodyByteCount` |
 
@@ -683,6 +684,11 @@ NetworkLens.start(
         // the ring buffer, with the real size kept as `originalBodyByteCount`.
         maxCapturedResponseBodyBytes: 1_048_576,
         productionHostPatterns: ["api.myapp.com"],   // guards request editing
+        // The two work together, and this pair is the conservative one: rules
+        // are written to disk, but only perturbations are allowed back. Set
+        // keepBreakpointsAcrossLaunches to true for mocks and breakpoints to
+        // return armed — a forgotten mock reads as a backend bug, and a
+        // forgotten breakpoint as a hang, which is why it is not the default.
         keepBreakpointsAcrossLaunches: false,        // nothing comes back armed
         persistsRules: true,                         // rules survive a relaunch
         redactsPersistedRules: true                  // and are scrubbed on disk

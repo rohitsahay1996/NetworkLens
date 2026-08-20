@@ -111,25 +111,40 @@ struct OverlayRootView: View {
 /// Tabs for the inspector surfaces.
 struct InspectorView: View {
 
+    /// The tabs, so one screen can send the tester to another. Traffic's filter
+    /// bar points at the host list, which lives in Session.
+    enum Tab: Hashable {
+        case traffic, mocks, setups, breakpoints, session
+    }
+
     @EnvironmentObject private var lens: LensObservable
     @Environment(\.dismiss) private var dismiss
+    @State private var selection = Tab.traffic
 
     var body: some View {
-        TabView {
-            tab { ExchangeListView() }
+        TabView(selection: $selection) {
+            tab { ExchangeListView(showHosts: { selection = .session }) }
                 .tabItem { Label("Traffic", systemImage: "list.bullet") }
+                .tag(Tab.traffic)
 
             tab { MockListView() }
                 .tabItem { Label("Mocks", systemImage: "square.on.square") }
+                .tag(Tab.mocks)
 
             tab { ScenarioListView() }
                 .tabItem { Label("Setups", systemImage: "square.stack.3d.down.right") }
+                .tag(Tab.setups)
 
             tab { BreakpointListView() }
                 .tabItem { Label("Breakpoints", systemImage: "pause.circle") }
+                .tag(Tab.breakpoints)
 
+            // Hosts and totals together. A sixth tab would have pushed iOS to
+            // collapse the bar into four items and a More list, burying two
+            // screens to surface one.
             tab { SessionStatsView() }
-                .tabItem { Label("Stats", systemImage: "chart.bar") }
+                .tabItem { Label("Session", systemImage: "chart.bar") }
+                .tag(Tab.session)
         }
     }
 

@@ -83,6 +83,7 @@ final class PersistenceTests: XCTestCase {
         Mocks.shared.removeAll()
         Mocks.shared.setMockingEnabled(true)
         Breakpoints.shared.clearForRelaunch()
+        Scenarios.shared.replaceAll([])
     }
 
     override func tearDown() {
@@ -92,6 +93,7 @@ final class PersistenceTests: XCTestCase {
         // off made unrelated suites fail depending on run order.
         Mocks.shared.setMockingEnabled(true)
         Breakpoints.shared.clearForRelaunch()
+        Scenarios.shared.replaceAll([])
         persistence = nil
         store = nil
         super.tearDown()
@@ -230,6 +232,69 @@ final class PersistenceTests: XCTestCase {
         persistence.flush()
 
         XCTAssertEqual(store.saveCount, 0, "restore must not write back what it just read")
+    }
+
+    /// Scenarios were snapshotted and restored but never observed, so a saved
+    /// setup reached disk only if a mock or breakpoint happened to change after
+    /// it. Saving something and having it silently not save is the worst
+    /// failure this class has.
+    func testSavingAScenarioTriggersAutosave() {
+        persistence.beginAutosave()
+        store.saveCount = 0
+
+        Scenarios.shared.save(Scenario(name: "empty cart", entries: []))
+        persistence.flush()
+
+        XCTAssertEqual(store.saved?.scenarios.count, 1)
+        XCTAssertEqual(store.saved?.scenarios.first?.name, "empty cart")
+    }
+
+    func testEndAutosaveStopsScenarioWrites() {
+        persistence.beginAutosave()
+        persistence.endAutosave()
+        store.saveCount = 0
+
+        Scenarios.shared.save(Scenario(name: "empty cart", entries: []))
+        persistence.flush()
+
+        XCTAssertEqual(store.saveCount, 0)
+    }
+
+    // MARK: - Lifecycle
+
+    /// Autosave is asynchronous, so a rule edited and immediately followed by
+    /// a kill could still be in flight. This is where "I changed a mock, killed
+    /// the app, and it was gone" came from.
+    func testBackgroundingWritesTheCurrentState() {
+        persistence.beginAutosave()
+        Mocks.shared.set(MockRule(endpointKey: "GET /users/{id}", response: .status(418)))
+        persistence.flush()
+        store.saveCount = 0
+
+        NotificationCenter.default.post(
+            name: Notification.Name("UIApplicationDidEnterBackgroundNotification"),
+            object: nil
+        )
+
+        // Synchronous, and with no `flush()` here on purpose: the write has to
+        // have completed by the time the notification handler returns, because
+        // after it there may be no process left to finish an async one.
+        XCTAssertEqual(store.saveCount, 1, "backgrounding must write")
+        XCTAssertEqual(store.saved?.mocks.count, 1)
+    }
+
+    /// Registered by `beginAutosave` and torn down with it, so a host app that
+    /// never turned persistence on is never written for.
+    func testBackgroundingDoesNothingWithoutAutosave() {
+        Mocks.shared.set(MockRule(endpointKey: "GET /users/{id}", response: .status(418)))
+        store.saveCount = 0
+
+        NotificationCenter.default.post(
+            name: Notification.Name("UIApplicationDidEnterBackgroundNotification"),
+            object: nil
+        )
+
+        XCTAssertEqual(store.saveCount, 0)
     }
 
     func testEndAutosaveStopsWriting() {

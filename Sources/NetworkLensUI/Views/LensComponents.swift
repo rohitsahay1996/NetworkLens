@@ -182,10 +182,17 @@ struct BodyView: View {
 
         case .json(let tree):
             VStack(alignment: .leading, spacing: 8) {
-                Picker("View", selection: $mode) {
-                    ForEach(BodyViewMode.allCases, id: \.self) { Text($0.label).tag($0) }
+                HStack(spacing: 10) {
+                    Picker("View", selection: $mode) {
+                        ForEach(BodyViewMode.allCases, id: \.self) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+
+                    // Copies the whole payload in either mode. The tree draws a
+                    // page at a time and the raw view is paged too, so without
+                    // this there is no way to get a large body off the device.
+                    CopyBodyButton(text: { rendered.fullText })
                 }
-                .pickerStyle(.segmented)
 
                 truncationNotice
 
@@ -198,7 +205,11 @@ struct BodyView: View {
 
         case .text:
             VStack(alignment: .leading, spacing: 4) {
-                truncationNotice
+                HStack {
+                    truncationNotice
+                    Spacer(minLength: 8)
+                    CopyBodyButton(text: { rendered.fullText })
+                }
                 PagedTextView(lines: rendered.lines).id(fingerprint)
             }
 
@@ -254,20 +265,11 @@ struct PagedTextView: View {
             }
 
             if lines.count > visible {
-                HStack(spacing: 12) {
-                    Button("Show \(min(Self.pageSize, lines.count - visible)) more") {
-                        visible += Self.pageSize
-                    }
-                    // The way out of paging: the whole payload, in one action,
-                    // to somewhere that can actually hold it. Drawing it here
-                    // is the thing being avoided.
-                    Button("Copy all") {
-                        #if canImport(UIKit)
-                        UIPasteboard.general.string = lines
-                            .map(\.text)
-                            .joined(separator: "\n")
-                        #endif
-                    }
+                // Copying lives on the body header, not here: it applies to the
+                // tree just as much, and two copy buttons meaning the same
+                // thing is worse than one somewhere predictable.
+                Button("Show \(min(Self.pageSize, lines.count - visible)) more") {
+                    visible += Self.pageSize
                 }
                 .font(.caption2)
                 .buttonStyle(.plain)
@@ -277,6 +279,45 @@ struct PagedTextView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+}
+
+/// Puts a whole body on the pasteboard, and says it did.
+///
+/// Confirms in place rather than through the detail screen's toast, because
+/// this sits inside `BodyView` — which the breakpoint and mock editors reuse,
+/// and neither of those has a toast. A copy button that gives no sign of
+/// having worked gets pressed four times.
+struct CopyBodyButton: View {
+
+    /// A closure, not a `String`. Joining the lines back together is a whole
+    /// megabyte for the bodies this exists for, and passing the built value
+    /// would pay for it on every redraw to feed a button nobody has tapped.
+    let text: () -> String
+
+    @State private var didCopy = false
+
+    var body: some View {
+        Button {
+            UIPasteboard.general.string = text()
+            didCopy = true
+        } label: {
+            Image(systemName: didCopy ? "checkmark.circle.fill" : "doc.on.doc")
+                .font(.footnote)
+                .foregroundStyle(didCopy ? Color.green : Color.accentColor)
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(didCopy ? "Copied" : "Copy body")
+        // Keyed on the flag, so a second tap restarts the countdown rather than
+        // letting the first one clear the tick mid-confirmation.
+        .task(id: didCopy) {
+            guard didCopy else { return }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled else { return }
+            didCopy = false
         }
     }
 }

@@ -42,6 +42,11 @@ struct RenderedBody: Sendable {
     /// Pretty-printed JSON, or the payload as text. Empty for binary bodies.
     var lines: [Line]
 
+    /// Rejoined on demand, for the copy action. Holding a second megabyte so
+    /// one button can be instant is the wrong trade — this is paid once, when
+    /// the button is actually tapped.
+    var fullText: String { lines.map(\.text).joined(separator: "\n") }
+
     static let empty = RenderedBody(kind: .empty, lines: [])
 
     // MARK: - Building

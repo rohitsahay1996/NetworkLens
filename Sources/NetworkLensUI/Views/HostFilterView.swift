@@ -63,83 +63,68 @@ extension NetworkExchange {
 
 /// Every host this session has seen, with what to do about each.
 ///
+/// A `Section` rather than a screen of its own: it lives in the Session tab
+/// alongside the totals, because "what did this app talk to" and "how much"
+/// are the same question asked twice, and a sixth tab would have collapsed the
+/// tab bar into a More list.
+///
 /// Counts come from the whole capture, not from what is currently shown —
-/// otherwise hiding a host would drop it off its own filter list and there
-/// would be no way back.
-struct HostFilterSheet: View {
+/// otherwise hiding a host would drop it off its own list and there would be
+/// no way back.
+struct HostFilterSection: View {
 
     @EnvironmentObject private var lens: LensObservable
     @ObservedObject var filter: HostFilter
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationView {
-            List {
-                Section {
-                    ForEach(hosts, id: \.host) { entry in
-                        Button {
-                            filter.setVisible(!filter.isVisible(entry.host), host: entry.host)
-                        } label: {
-                            HStack(spacing: 10) {
-                                Image(systemName: filter.isVisible(entry.host)
-                                    ? "checkmark.circle.fill"
-                                    : "circle")
-                                    .foregroundStyle(filter.isVisible(entry.host)
-                                        ? Color.accentColor
-                                        : Color.secondary)
+        Section {
+            ForEach(hosts, id: \.host) { entry in
+                Button {
+                    filter.setVisible(!filter.isVisible(entry.host), host: entry.host)
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: filter.isVisible(entry.host)
+                            ? "checkmark.circle.fill"
+                            : "circle")
+                            .foregroundStyle(filter.isVisible(entry.host)
+                                ? Color.accentColor
+                                : Color.secondary)
 
-                                Text(entry.host)
-                                    .font(.system(.subheadline, design: .monospaced))
-                                    .foregroundStyle(filter.isVisible(entry.host)
-                                        ? .primary
-                                        : .secondary)
-                                    .lineLimit(1)
+                        Text(entry.host)
+                            .font(.system(.subheadline, design: .monospaced))
+                            .foregroundStyle(filter.isVisible(entry.host) ? .primary : .secondary)
+                            .lineLimit(1)
 
-                                Spacer(minLength: 8)
+                        Spacer(minLength: 8)
 
-                                Text("\(entry.count)")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
+                        Text("\(entry.count)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
-                } header: {
-                    // Busiest first: the host worth hiding is nearly always the
-                    // one flooding the list, and alphabetical buries it.
-                    Text("\(hosts.count) \(hosts.count == 1 ? "host" : "hosts") · busiest first")
-                } footer: {
-                    Text("Hides rows from the traffic list only. Nothing here changes what is captured, mocked or held — a hidden host is still intercepted, and still counted under Stats.")
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+            }
 
-                Section {
+            if !hosts.isEmpty {
+                HStack(spacing: 20) {
                     Button("Show all") { filter.showAll() }
                         .disabled(!filter.isActive)
                     Button("Hide all") { filter.hideAll(hosts.map(\.host)) }
-                        .disabled(hosts.isEmpty)
-                } footer: {
-                    Text("A host first seen after this appears anyway. The filter remembers what to hide, not what to show, so new traffic is never silently dropped.")
+                    Spacer(minLength: 0)
                 }
+                .font(.footnote)
+                .buttonStyle(.plain)
             }
-            .navigationTitle("Filter by host")
-            .navigationBarTitleDisplayMode(.inline)
-            .overlay {
-                if hosts.isEmpty {
-                    EmptyStateView(
-                        title: "No traffic yet",
-                        message: "Hosts appear here as the app makes requests.",
-                        systemImage: "globe"
-                    )
-                }
-            }
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
+        } header: {
+            // Busiest first: the host worth hiding is nearly always the one
+            // flooding the list, and alphabetical buries it.
+            Text(hosts.isEmpty
+                 ? "Hosts"
+                 : "Hosts · \(hosts.count) seen, busiest first")
+        } footer: {
+            Text("Unchecked hosts are hidden from the Traffic list only. Nothing here changes what is captured, mocked or held — a hidden host is still intercepted, and still counted below. A host first seen after this appears anyway: the filter remembers what to hide, not what to show.")
         }
-        .navigationViewStyle(.stack)
     }
 
     private var hosts: [(host: String, count: Int)] {

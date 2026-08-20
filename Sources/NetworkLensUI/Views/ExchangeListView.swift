@@ -12,11 +12,16 @@ import NetworkLensCore
 /// The captured traffic, newest first.
 struct ExchangeListView: View {
 
+    /// Sends the tester to the host list, which lives in the Session tab.
+    /// Passed in rather than reached for: this view does not own the tab bar,
+    /// and a filter bar that silently did nothing when hosted elsewhere would
+    /// be worse than no filter bar.
+    var showHosts: () -> Void = {}
+
     @EnvironmentObject private var lens: LensObservable
     @ObservedObject private var filter = HostFilter.shared
     @State private var query = ""
     @State private var groupsByScreen = false
-    @State private var isFilterPresented = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -84,9 +89,6 @@ struct ExchangeListView: View {
             )
         ) {
             Button("OK", role: .cancel) { lens.notice = nil }
-        }
-        .sheet(isPresented: $isFilterPresented) {
-            HostFilterSheet(filter: filter).environmentObject(lens)
         }
         .overlay {
             if results.isEmpty { emptyState }
@@ -187,7 +189,7 @@ struct ExchangeListView: View {
     private var filterBar: some View {
         HStack(spacing: 8) {
             Button {
-                isFilterPresented = true
+                showHosts()
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: hiddenHostCount > 0
@@ -195,7 +197,7 @@ struct ExchangeListView: View {
                         : "line.3.horizontal.decrease.circle")
                     Text(filterLabel)
                         .lineLimit(1)
-                    Image(systemName: "chevron.down")
+                    Image(systemName: "chevron.right")
                         .font(.caption2.weight(.semibold))
                 }
                 .font(.footnote.weight(.medium))
@@ -263,7 +265,7 @@ struct ExchangeListView: View {
             EmptyStateView(
                 title: "Every host is hidden",
                 message: "\(hiddenHostCount) \(hiddenHostCount == 1 ? "host is" : "hosts are") "
-                    + "filtered out. Tap the filter to bring them back.",
+                    + "filtered out. Tap Show all, or pick hosts in the Session tab.",
                 systemImage: "line.3.horizontal.decrease.circle.fill"
             )
         } else {
