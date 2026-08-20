@@ -21,13 +21,14 @@ Requires iOS 15+. No dependencies.
    - [Alamofire, Moya and other wrappers](#d-alamofire-moya-and-other-wrappers)
    - [Delegate-based and multiple sessions](#e-delegate-based-and-multiple-sessions)
 5. [The one ordering rule](#the-one-ordering-rule)
-6. [Screen attribution](#screen-attribution)
-7. [Keeping it out of release builds](#keeping-it-out-of-release-builds)
-8. [Verifying it works](#verifying-it-works)
-9. [Troubleshooting](#troubleshooting)
-10. [What it cannot see](#what-it-cannot-see)
-11. [Using it](#using-it)
-12. [API cheat sheet](#api-cheat-sheet)
+6. [Legacy UIKit: AppDelegate, no SceneDelegate](#legacy-uikit-appdelegate-no-scenedelegate)
+7. [Screen attribution](#screen-attribution)
+8. [Keeping it out of release builds](#keeping-it-out-of-release-builds)
+9. [Verifying it works](#verifying-it-works)
+10. [Troubleshooting](#troubleshooting)
+11. [What it cannot see](#what-it-cannot-see)
+12. [Using it](#using-it)
+13. [API cheat sheet](#api-cheat-sheet)
 
 ---
 
@@ -74,7 +75,7 @@ struct MyApp: App {
 }
 ```
 
-UIKit:
+UIKit, with a scene delegate:
 
 ```swift
 import NetworkLens
@@ -91,6 +92,9 @@ func sceneDidBecomeActive(_ scene: UIScene) {
     NetworkLens.attachOverlay(to: windowScene)
 }
 ```
+
+No scene delegate — an app delegate that still owns `var window: UIWindow?`?
+See [Legacy UIKit](#legacy-uikit-appdelegate-no-scenedelegate).
 
 For many apps that is the entire integration. Whether it is enough for *yours*
 depends on where your sessions come from, which the next section explains.
@@ -317,6 +321,145 @@ happens to run.
 
 ---
 
+## Legacy UIKit: AppDelegate, no SceneDelegate
+
+An app that predates iOS 13 has no `SceneDelegate` and no
+`UIApplicationSceneManifest` in its `Info.plist`. The app delegate builds the
+window itself:
+
+```swift
+window = UIWindow(frame: UIScreen.main.bounds)
+window?.rootViewController = RootViewController()
+window?.makeKeyAndVisible()
+```
+
+Interception does not care. `start()` works identically — it hooks
+`URLProtocol` and the configuration getters, neither of which knows what a scene
+is. **Capture, mocking, breakpoints and replay all work with no changes.**
+
+Only the overlay needs thought, because `attachOverlay(to:)` takes a
+`UIWindowScene` and this app never sees one. Full integration:
+
+```swift
+import UIKit
+import NetworkLens
+
+@main
+final class AppDelegate: UIResponder, UIApplicationDelegate {
+
+    var window: UIWindow?
+
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
+    ) -> Bool {
+
+        // First line of the method. Everything below may build a session, and
+        // a session built before this line is never intercepted.
+        NetworkLens.start()
+
+        window = UIWindow(frame: UIScreen.main.bounds)
+        window?.rootViewController = RootViewController()
+        window?.makeKeyAndVisible()
+
+        showLensOverlay()
+        return true
+    }
+
+    private func showLensOverlay() {
+        // makeKeyAndVisible() has run, so the window is on screen and iOS has
+        // given it a scene.
+        if let scene = window?.windowScene {
+            NetworkLens.attachOverlay(to: scene)
+            return
+        }
+
+        // One retry, next runloop tick, for the case where it has not. Not a
+        // loop — see the warning below.
+        DispatchQueue.main.async {
+            NetworkLens.attachOverlayToActiveScene()
+        }
+    }
+}
+```
+
+There is no compatibility shim involved: iOS 13+ runs a scene-less app inside
+one implicit `UIWindowScene` anyway, so `window?.windowScene` is the same handle
+a modern app passes in, obtained a different way.
+
+> **Never write `while !NetworkLens.attachOverlayToActiveScene() { }`, or retry
+> on a timer until it returns `true`.** In a release build the call is the inert
+> mirror and always returns `false`, so that loop never ends — a debug-only
+> convenience turning into a shipped hang. Attempt it a bounded number of times
+> and let it fail quietly.
+
+### Objective-C app delegates
+
+The package is Swift-only and exposes no `@objc` surface, so an
+`AppDelegate.m` cannot call it. Add one Swift file and call that:
+
+```swift
+// LensBootstrap.swift
+import UIKit
+import NetworkLens
+
+@objc final class LensBootstrap: NSObject {
+
+    @objc static func start() {
+        NetworkLens.start()
+    }
+
+    // @MainActor because attachOverlay(to:) is. Without it this does not
+    // compile, which is easy to miss in a shim that looks like plumbing.
+    @MainActor
+    @objc static func attachOverlay(to window: UIWindow) {
+        guard let scene = window.windowScene else { return }
+        NetworkLens.attachOverlay(to: scene)
+    }
+}
+```
+
+```objc
+// AppDelegate.m
+#import "YourApp-Swift.h"
+
+[LensBootstrap start];
+// ...after makeKeyAndVisible
+[LensBootstrap attachOverlayToWindow:self.window];
+```
+
+Keep the shim thin. Everything it wraps is inert in a release build, so the
+shim inherits that and needs no `#if` of its own.
+
+### Screen attribution from view controllers
+
+The ambient API is the natural fit here, because a view controller has exactly
+the lifecycle it wants — but read the caveat under
+[Screen attribution](#screen-attribution) first: it is wrong for a controller
+that presents another one which also fires requests.
+
+```swift
+final class CheckoutViewController: UIViewController {
+
+    private var lensToken: UUID?
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        lensToken = ScreenContext.shared.push("Checkout")
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        if let lensToken { ScreenContext.shared.pop(lensToken) }
+    }
+}
+```
+
+Prefer `NetworkLens.tagged(request, screen:)` when a screen fires several calls
+at once.
+
+---
+
 ## Screen attribution
 
 Grouping traffic by screen turns a list into an explanation, which matters most
@@ -377,6 +520,12 @@ nothing, so every call site compiles untouched. A dedicated test target compiles
 host-shaped code against it, so the build fails the day the two diverge rather
 than months later in a release build.
 
+One caveat worth knowing if you run the tests yourself: the overlay half of that
+surface is UIKit-only, so `swift test` on macOS cannot see it. Run the package
+against an iOS simulator destination to check those call sites — that gap is
+exactly how the mirror once went several versions without
+`networkLensOverlay()`.
+
 **Three strategies, strictest first:**
 
 1. **Provable removal** — link `NetworkLensNoOp` in Release and `NetworkLensUI`
@@ -388,8 +537,11 @@ than months later in a release build.
 3. **Ship it deliberately** — some teams keep the lens in internal builds only,
    distributed through TestFlight with `NETWORKLENS_ENABLED`.
 
-Whichever you pick, keep `start()` and `.networkLensOverlay()` behind the same
-condition; both are no-ops in the mirror, so they are safe to leave in place.
+Whichever you pick, keep `start()` and the overlay calls behind the same
+condition. `.networkLensOverlay()`, `attachOverlay(to:)`, `detachOverlay(from:)`
+and `attachOverlayToActiveScene()` are all no-ops in the mirror, so they are
+safe to leave in place — including the app delegate wiring in
+[Legacy UIKit](#legacy-uikit-appdelegate-no-scenedelegate).
 
 ---
 
@@ -489,9 +641,11 @@ NetworkLens.install(into: URLSessionConfiguration) -> Bool
 NetworkLens.canIntercept(_: URLSessionConfiguration) -> Bool
 NetworkLens.uninterceptable: [String]
 
-// Overlay
-View.networkLensOverlay()
+// Overlay — all @MainActor
+View.networkLensOverlay()                // SwiftUI
 NetworkLens.attachOverlay(to: UIWindowScene)
+NetworkLens.detachOverlay(from: UIWindowScene)
+NetworkLens.attachOverlayToActiveScene() -> Bool   // never loop on this
 
 // Attribution
 NetworkLens.tagged(_ request: URLRequest, screen: String) -> URLRequest

@@ -72,6 +72,17 @@ public enum NetworkLens {
 
     #if canImport(UIKit)
     public static func attachOverlay(to scene: UIWindowScene) {}
+
+    public static func detachOverlay(from scene: UIWindowScene) {}
+
+    /// Always `false` here: there is no overlay to attach in a release build.
+    ///
+    /// Worth stating because the real one returns `false` only when it finds no
+    /// scene. Host code must therefore never retry until this returns `true` —
+    /// that loop would never end in release. The README's legacy UIKit snippet
+    /// makes a single deferred attempt for this reason.
+    @discardableResult
+    public static func attachOverlayToActiveScene() -> Bool { false }
     #endif
 }
 

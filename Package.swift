@@ -23,6 +23,10 @@ let package = Package(
         .target(name: "NetworkLensUI", dependencies: ["NetworkLensCore"]),
         .target(name: "NetworkLensNoOp"),
         .testTarget(name: "NetworkLensCoreTests", dependencies: ["NetworkLensCore"]),
+        // Compiles the README's UIKit lifecycle code. Empty on macOS, which is
+        // the point: these are the snippets `swift test` can never check, so
+        // they need an iOS simulator destination to mean anything.
+        .testTarget(name: "NetworkLensUITests", dependencies: ["NetworkLensUI"]),
         // Compiles host-shaped call sites against the inert mirror. Its job is
         // to fail the build when Core grows API that NoOp did not, which is
         // otherwise only discovered by a release build months later.

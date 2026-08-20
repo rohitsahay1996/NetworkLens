@@ -8,6 +8,11 @@
 import XCTest
 import NetworkLensNoOp
 
+#if canImport(UIKit)
+import UIKit
+import SwiftUI
+#endif
+
 /// Host-shaped call sites, compiled against the inert mirror.
 ///
 /// Most of the value here is that it compiles at all: `NetworkLensNoOp`
@@ -240,4 +245,41 @@ final class APIParityTests: XCTestCase {
         XCTAssertNil(ScreenContext.shared.current)
         XCTAssertTrue(ScreenContext.shared.trail.isEmpty)
     }
+
+    // MARK: - Overlay
+    //
+    // These only compile on a UIKit run. The mirror shipped without
+    // `attachOverlayToActiveScene()` and `networkLensOverlay()` for a while and
+    // nothing caught it, because the macOS test run — the one CI does — cannot
+    // see either. Run the package against an iOS simulator destination to get
+    // any value out of this section.
+
+    #if canImport(UIKit)
+    /// The three overlay entry points a host can write, compiled inert.
+    ///
+    /// `attachOverlay(to:)` needs a real `UIWindowScene`, which a test has no
+    /// way to conjure, so it is referenced as a function value rather than
+    /// called. That still fails the build if the signature drifts, which is the
+    /// whole point.
+    @MainActor
+    func testOverlaySurfaceCompiles() {
+        let attach: (UIWindowScene) -> Void = NetworkLens.attachOverlay(to:)
+        let detach: (UIWindowScene) -> Void = NetworkLens.detachOverlay(from:)
+        XCTAssertNotNil(attach)
+        XCTAssertNotNil(detach)
+
+        XCTAssertFalse(
+            NetworkLens.attachOverlayToActiveScene(),
+            "the mirror never attaches, so host code must not retry until true"
+        )
+    }
+
+    /// The SwiftUI call site, which is the one a release build most often
+    /// breaks on: it sits in the app's scene body, so it fails the whole app
+    /// target rather than one file.
+    @MainActor
+    func testSwiftUIOverlayModifierCompiles() {
+        _ = Text("host content").networkLensOverlay()
+    }
+    #endif
 }

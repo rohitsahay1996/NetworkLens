@@ -58,13 +58,15 @@ public final class Breakpoints: @unchecked Sendable {
         notify()
     }
 
-    /// Adds or replaces the rule for an endpoint key.
+    /// Adds or replaces the rule for a match identity.
     ///
-    /// Keyed by endpoint rather than appended blindly, so swiping the same row
-    /// twice does not arm two overlapping breakpoints.
+    /// Keyed by what the rule actually matches rather than appended blindly, so
+    /// arming the same endpoint or the same URL twice does not leave two
+    /// overlapping breakpoints. Two exact-URL breakpoints on the same endpoint
+    /// stay distinct — their identity is the URL, not the shared endpoint key.
     public func set(_ breakpoint: Breakpoint) {
         lock.lock()
-        if let index = storage.firstIndex(where: { $0.endpointKey == breakpoint.endpointKey }) {
+        if let index = storage.firstIndex(where: { $0.matchIdentity == breakpoint.matchIdentity }) {
             storage[index] = breakpoint
         } else {
             storage.append(breakpoint)
@@ -198,50 +200,103 @@ public final class Breakpoints: @unchecked Sendable {
     // MARK: - Hot path
 
     public func shouldPauseRequest(for request: URLRequest) -> Bool {
-        guard let key = matchKey(for: request) else { return false }
-
+        guard let rule = enabledRule(matching: request), rule.stage.pausesRequest else {
+            return false
+        }
         lock.lock()
         let enabled = requestEditingEnabled
-        let skipped = skippedKeys.contains(key)
-        let rule = storage.first { $0.endpointKey == key && $0.isEnabled }
+        let skipped = skippedKeys.contains(rule.matchIdentity)
         lock.unlock()
 
-        guard enabled, !skipped, let rule, rule.stage.pausesRequest else { return false }
+        guard enabled, !skipped else { return false }
         // Production hosts refuse request breakpoints outright. Response
         // breakpoints stay available — they cannot reach the backend.
         return !NetworkLens.configuration.isProductionHost(request.url?.host)
     }
 
     public func shouldPauseResponse(for request: URLRequest) -> Bool {
-        guard let key = matchKey(for: request) else { return false }
-
+        guard let rule = enabledRule(matching: request), rule.stage.pausesResponse else {
+            return false
+        }
         lock.lock()
-        let skipped = skippedKeys.contains(key)
-        let rule = storage.first { $0.endpointKey == key && $0.isEnabled }
+        let skipped = skippedKeys.contains(rule.matchIdentity)
         lock.unlock()
-
-        guard !skipped, let rule, rule.stage.pausesResponse else { return false }
-        return true
+        return !skipped
     }
 
-    /// Disables a one-shot rule after it fires.
-    public func didHit(endpointKey key: String) {
+    /// The identity the coordinator should carry for a paused request, so a
+    /// one-shot disarm and a session skip land on the exact rule that fired
+    /// rather than every breakpoint sharing its endpoint key.
+    public func matchIdentity(for request: URLRequest) -> String? {
+        enabledRule(matching: request)?.matchIdentity
+    }
+
+    /// The enabled rule that claims this request, or `nil`.
+    ///
+    /// URL-scoped rules are the more specific intent, so they win over an
+    /// endpoint rule that also covers the request. The matcher chain is only
+    /// consulted when an endpoint-style rule exists to need it — a session with
+    /// only URL breakpoints armed never pays for it.
+    private func enabledRule(matching request: URLRequest) -> Breakpoint? {
         lock.lock()
-        if let index = storage.firstIndex(where: { $0.endpointKey == key }), storage[index].oneShot {
+        let all = storage
+        lock.unlock()
+        // Runs on every request, armed or not; bail before any URL work.
+        guard !all.isEmpty else { return nil }
+
+        if let url = request.url {
+            let target = Self.canonicalURL(url)
+            if let rule = all.first(where: {
+                $0.isEnabled && $0.url.flatMap(Self.canonicalURL(fromPattern:)) == target
+            }) {
+                return rule
+            }
+        }
+
+        guard all.contains(where: { $0.isEnabled && $0.url == nil }) else { return nil }
+        let key = NetworkLens.endpointKey(for: request)
+        return all.first { $0.isEnabled && $0.url == nil && $0.endpointKey == key }
+    }
+
+    /// Disables a one-shot rule after it fires. Keyed by match identity — the
+    /// same string the coordinator was handed for this pause.
+    public func didHit(endpointKey identity: String) {
+        lock.lock()
+        if let index = storage.firstIndex(where: { $0.matchIdentity == identity }),
+           storage[index].oneShot {
             storage[index].isEnabled = false
         }
         lock.unlock()
         notify()
     }
 
-    private func matchKey(for request: URLRequest) -> String? {
-        lock.lock()
-        let hasAny = !storage.isEmpty
-        lock.unlock()
-        // Skip the matcher chain entirely when nothing is armed. This runs on
-        // every request, armed or not.
-        guard hasAny else { return nil }
-        return NetworkLens.endpointKey(for: request)
+    /// Canonical form used to compare a URL breakpoint against live traffic.
+    ///
+    /// A URL breakpoint is armed from the stored exchange, whose URL has
+    /// already been through the redactor, so the live request is run through
+    /// the same redactor before comparing — otherwise a breakpoint on a URL
+    /// carrying a sensitively named query param (`?access_token=…`) would never
+    /// match the traffic it was armed from. Query order is normalised too,
+    /// since URLSession does not promise to preserve it, and the fragment is
+    /// dropped — it never reaches the server.
+    static func canonicalURL(_ url: URL) -> String {
+        let redacted = NetworkLens.configuration.redactor
+            .redact(RequestSnapshot(method: "GET", url: url)).url
+        guard var components = URLComponents(url: redacted, resolvingAgainstBaseURL: false) else {
+            return redacted.absoluteString
+        }
+        components.fragment = nil
+        if let items = components.queryItems, !items.isEmpty {
+            components.queryItems = items.sorted {
+                $0.name != $1.name ? $0.name < $1.name : ($0.value ?? "") < ($1.value ?? "")
+            }
+        }
+        return components.string ?? redacted.absoluteString
+    }
+
+    /// The stored pattern in canonical form, or `nil` if it is not a URL.
+    static func canonicalURL(fromPattern pattern: String) -> String? {
+        URL(string: pattern).map(canonicalURL)
     }
 
     // MARK: - Observation
