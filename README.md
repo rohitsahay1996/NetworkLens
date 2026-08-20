@@ -28,7 +28,8 @@ Requires iOS 15+. No dependencies.
 10. [Troubleshooting](#troubleshooting)
 11. [What it cannot see](#what-it-cannot-see)
 12. [Using it](#using-it)
-13. [API cheat sheet](#api-cheat-sheet)
+13. [Driving it from a UI test](#driving-it-from-a-ui-test)
+14. [API cheat sheet](#api-cheat-sheet)
 
 ---
 
@@ -568,6 +569,7 @@ If step 2 never happens, see the next section.
 | `WKWebView` requests missing | Out of `URLProtocol`'s reach | Not supported — see below |
 | Mocks not served | Master switch off, or rule disabled | Mocks tab → *Mocking enabled*; the bubble turns purple when mocks are serving |
 | Bubble never appears | `.networkLensOverlay()` missing, or no active scene | Attach it, or call `attachOverlay(to:)` from the scene delegate |
+| A launch-argument scenario did nothing | Persistence is off, so there was nothing on disk to name | `persistsRules: true` **and** `keepBreakpointsAcrossLaunches: true` — see [Driving it from a UI test](#driving-it-from-a-ui-test); the overlay also shows the miss and the names it did find |
 | Mocks vanish on relaunch | Default behaviour, and `persistsRules` alone is not enough | `LensConfiguration(keepBreakpointsAcrossLaunches: true, persistsRules: true)` — the first decides what may come back *armed*, the second whether anything is written at all |
 | Mocks come back but behave differently | `redactsPersistedRules` scrubbed the token out of the saved copy | `redactsPersistedRules: false`, deliberately — the rule then lands on disk carrying whatever the response carried |
 | Auth fails only with the lens attached | The real leg is not carrying your session's cookies or headers | `NetworkLens.install(into:)` with the configuration your app actually uses — it is copied for that leg |
@@ -629,7 +631,71 @@ drift detection when the response shape moves under it.
 **Replay** — re-fire a captured request, or a whole screen's, through the full
 pipeline so armed mocks and variants apply.
 
-**Export** — copy any request as `curl`, redacted by default.
+**Edit** — tap a field in the response tree to change it, empty a list, null a
+value, or duplicate a row a hundred times to push a paginated screen past its
+page size. Edits are stored as JSON-patch ops against the captured payload, not
+as rewritten bytes, so a mock written today still means something after the
+server adds a field.
+
+**Export** — copy any request as `curl`, redacted by default, or copy a whole
+body to the pasteboard from the tree.
+
+---
+
+## Driving it from a UI test
+
+Everything the overlay does is reachable in code, which is the point: a setup
+built by hand once should not have to be rebuilt by hand ever again.
+
+Build the scenario in the app, then name it at launch:
+
+```swift
+// UITests
+let app = XCUIApplication()
+app.launchArguments += ["-NetworkLensScenario", "cart empty"]
+app.launch()
+```
+
+or, when a test plan makes arguments awkward, through the environment:
+
+```swift
+app.launchEnvironment["NETWORKLENS_SCENARIO"] = "cart empty"
+```
+
+The name is matched ignoring case and surrounding whitespace. An argument beats
+the environment, so a scheme can set a default that a single run overrides.
+
+**This needs persistence on.** A launch argument names a scenario saved on a
+previous run, and nothing is read off disk unless you ask for it. The CI path is
+the one case where persistence is unambiguously wanted:
+
+```swift
+NetworkLens.start(
+    configuration: LensConfiguration(
+        keepBreakpointsAcrossLaunches: true,   // let saved rules come back armed
+        persistsRules: true,                   // ...and be written in the first place
+        redactsPersistedRules: false           // a mock that needs its token to work
+    )
+)
+```
+
+Consider `redactsPersistedRules: false` here specifically. It defaults on, and it
+is the right default for a device someone carries around — but a mock whose token
+was scrubbed will not satisfy an app that reads that token back, and a test
+failing for that reason is a long afternoon.
+
+Apply one directly instead, if you would rather not depend on what is on disk:
+
+```swift
+let activation = NetworkLens.applyScenario(named: "cart empty")
+XCTAssertTrue(activation.isApplied, activation.summary)
+```
+
+It returns rather than throws, and reports a miss as data — because a test that
+asks for a scenario, silently gets live traffic and passes anyway is reporting
+green about a state it never entered. When a launch argument misses, the overlay
+says so on screen and `NetworkLens.launchScenarioActivation` carries the same
+answer.
 
 ---
 
@@ -659,7 +725,13 @@ NetworkLens.record(_ exchange: NetworkExchange)
 // Rules, programmatically
 Mocks.shared.set(_:) / .activateVariant(_:forRuleID:) / .setMockingEnabled(_:)
 Breakpoints.shared.set(_:) / .save(_ perturbation:)
-Scenarios.shared.save(_:) / .apply(_:)
+Scenarios.shared.save(_:) / .apply(_:) / .scenario(named:)
+
+// UI tests and CI
+NetworkLens.applyScenario(named: String) -> ScenarioActivation
+NetworkLens.launchScenarioActivation: ScenarioActivation?
+LensLaunchOptions.scenarioFlag            // "-NetworkLensScenario"
+LensLaunchOptions.scenarioEnvironmentKey  // "NETWORKLENS_SCENARIO"
 
 // Export and replay
 CurlExport.command(for: exchange, secrets: .redacted)

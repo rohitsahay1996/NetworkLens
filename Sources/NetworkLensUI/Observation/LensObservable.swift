@@ -59,6 +59,19 @@ public final class LensObservable: ObservableObject {
             Task { @MainActor [weak self] in self?.revision &+= 1 }
         }
         Task { await self.attachToCoordinator() }
+        surfaceLaunchScenario()
+    }
+
+    /// Says out loud what a launch argument did, when it did not work.
+    ///
+    /// A success stays quiet — the tester asked for that state and is looking
+    /// at it. A miss cannot: the app then behaves exactly as if the tool were
+    /// not installed, and the one person who could fix the typo is the one
+    /// person not being told.
+    private func surfaceLaunchScenario() {
+        guard let activation = NetworkLens.launchScenarioActivation,
+              !activation.isApplied else { return }
+        notice = activation.summary
     }
 
     private func attachToCoordinator() async {

@@ -214,6 +214,96 @@ final class PatchOpApplicationTests: XCTestCase {
         XCTAssertNil(try tree.value(at: JSONPointer(string: "/nope")))
     }
 
+    // MARK: - Pointers built by walking a tree
+
+    /// The tree editor addresses nodes by building a pointer token by token as
+    /// it walks. That only works if a built pointer round-trips through its own
+    /// text form — which it does *because* `description` escapes. The old tree
+    /// interpolated `"\(path)/\(key)"` by hand and did not escape, so a key
+    /// with a slash in it silently addressed the wrong node.
+    func testAPointerBuiltByAppendingSurvivesItsOwnTextForm() throws {
+        let pointer = JSONPointer(tokens: []).appending("a/b").appending("c~d")
+
+        XCTAssertEqual(pointer.description, "/a~1b/c~0d")
+        XCTAssertEqual(try JSONPointer(string: pointer.description), pointer)
+        XCTAssertEqual(pointer.tokens, ["a/b", "c~d"])
+    }
+
+    /// The failure the escaping prevents: without it, `"a/b"` reads back as two
+    /// tokens and resolves to a node nobody asked for.
+    func testAKeyContainingASlashAddressesItsOwnNode() throws {
+        let tree = try parse(#"{"a/b":{"stock":5},"a":{"b":{"stock":99}}}"#)
+        let pointer = JSONPointer(tokens: []).appending("a/b").appending("stock")
+
+        XCTAssertEqual(tree.value(at: pointer)?.numberLiteral, "5")
+
+        let edited = try tree.applying(PatchOp(kind: .replace, path: pointer, value: .number("0")))
+        XCTAssertEqual(edited.value(at: pointer)?.numberLiteral, "0")
+        // The lookalike is untouched.
+        XCTAssertEqual(
+            edited.value(at: try JSONPointer(string: "/a/b/stock"))?.numberLiteral,
+            "99"
+        )
+    }
+
+    func testAKeyContainingATildeAddressesItsOwnNode() throws {
+        let tree = try parse(#"{"a~b":1,"a":2}"#)
+        let pointer = JSONPointer(tokens: []).appending("a~b")
+
+        XCTAssertEqual(tree.value(at: pointer)?.numberLiteral, "1")
+        XCTAssertEqual(pointer.description, "/a~0b")
+    }
+
+    // MARK: - Staged edits
+
+    /// What the tree editor stages when someone taps "Empty this list" and then
+    /// edits a field: ops accumulate against the original and replay in order.
+    func testStagedOpsReplayFromTheOriginal() throws {
+        let tree = try parse(#"{"items":[1,2,3],"total":3}"#)
+        let ops = [
+            PatchOp(kind: .replace, path: try JSONPointer(string: "/items"), value: .array([])),
+            PatchOp(kind: .replace, path: try JSONPointer(string: "/total"), value: .number("0")),
+        ]
+
+        let edited = try tree.applying(ops)
+
+        XCTAssertEqual(JSONNodeSerializer.string(from: edited), #"{"items":[],"total":0}"#)
+        // The original is a value type and stays exactly as captured.
+        XCTAssertEqual(JSONNodeSerializer.string(from: tree), #"{"items":[1,2,3],"total":3}"#)
+    }
+
+    /// "Duplicate ×N" appends copies of a row the server actually sent, so a
+    /// paginated screen can be pushed past its page size without invented data.
+    func testDuplicatingAnElementAppendsCopies() throws {
+        let tree = try parse(#"{"items":[{"id":1}]}"#)
+        let element = try XCTUnwrap(tree.value(at: try JSONPointer(string: "/items/0")))
+        let append = PatchOp(
+            kind: .add, path: try JSONPointer(string: "/items/-"), value: element
+        )
+
+        let edited = try tree.applying([append, append, append])
+
+        guard case .object(let entries) = edited,
+              case .array(let items) = entries[0].value else {
+            return XCTFail("expected items to still be an array")
+        }
+        XCTAssertEqual(items.count, 4)
+        XCTAssertEqual(items.last, element)
+    }
+
+    /// An op whose pointer no longer resolves must throw rather than silently
+    /// doing nothing — the editor drops it and says so instead of leaving a
+    /// list of edits that can never be applied again.
+    func testAnOpAgainstARemovedParentThrows() throws {
+        let tree = try parse(#"{"data":{"items":[1]}}"#)
+        let remove = PatchOp(kind: .remove, path: try JSONPointer(string: "/data"))
+        let intoRemoved = PatchOp(
+            kind: .replace, path: try JSONPointer(string: "/data/items"), value: .array([])
+        )
+
+        XCTAssertThrowsError(try tree.applying([remove, intoRemoved]))
+    }
+
     // MARK: - Codable
 
     func testPatchOpCodableRoundTrip() throws {

@@ -120,6 +120,25 @@ final class APIParityTests: XCTestCase {
         XCTAssertEqual(Scenario.capturing("x", from: []).entries.count, 0)
     }
 
+    /// The launch-argument bridge is the one surface a UI test drives directly,
+    /// so a release build has to compile the same call sites — and has to fail
+    /// the assertion rather than quietly report success it cannot deliver.
+    func testLaunchScenarioSurfaceCompilesAndAppliesNothing() {
+        XCTAssertEqual(LensLaunchOptions.scenarioFlag, "-NetworkLensScenario")
+        XCTAssertEqual(LensLaunchOptions.scenarioEnvironmentKey, "NETWORKLENS_SCENARIO")
+        XCTAssertNil(
+            LensLaunchOptions.scenarioName(
+                arguments: ["app", "-NetworkLensScenario", "cart empty"],
+                environment: ["NETWORKLENS_SCENARIO": "cart empty"]
+            )
+        )
+
+        let activation = NetworkLens.applyScenario(named: "cart empty")
+        XCTAssertFalse(activation.isApplied)
+        XCTAssertEqual(activation, .noSuchScenario(name: "cart empty", available: []))
+        XCTAssertNil(NetworkLens.launchScenarioActivation)
+    }
+
     func testCurlExportSurfaceCompilesAndRendersNothing() {
         let exchange = NetworkExchange(
             endpointKey: "GET /users/{id}",

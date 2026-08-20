@@ -28,8 +28,14 @@ struct JSONTreeView: View {
 
     let tree: JSONTree
 
+    /// Present only in the mock editor. `nil` is the read-only tree the traffic
+    /// detail screen shows — the same view, without any of the tap targets, so
+    /// inspecting a live response can never accidentally edit it.
+    var editor: BodyEditSession?
+
     /// Collapsed containers, by path.
     @State private var collapsed: Set<String> = []
+    @State private var editing: EditTarget?
     /// Only what is visible under `collapsed`, maintained incrementally.
     @State private var rows: [JSONTreeRow.Row] = []
     /// Rows actually drawn. A single expand can uncover tens of thousands of
@@ -41,11 +47,13 @@ struct JSONTreeView: View {
     var body: some View {
         LazyVStack(alignment: .leading, spacing: 2) {
             ForEach(Array(0..<min(visibleRows, rows.count)), id: \.self) { index in
+                let row = rows[index]
                 JSONTreeRow(
-                    row: rows[index],
-                    isCollapsed: collapsed.contains(rows[index].path),
+                    row: row,
+                    isCollapsed: collapsed.contains(row.path),
                     toggle: { toggle(at: index) }
                 )
+                .contextMenu { actions(for: row) }
             }
 
             if rows.count > visibleRows {
@@ -67,6 +75,91 @@ struct JSONTreeView: View {
             collapsed = tree.collapsed
             rows = tree.rows
         }
+        // An edit rewrites the payload, so the visible rows have to be rebuilt
+        // against the tester's own collapse state rather than a freshly seeded
+        // one — otherwise every keystroke folds the branch they are working in.
+        .onChange(of: tree.node) { node in reflatten(from: node) }
+        .sheet(item: $editing) { target in
+            JSONValueEditor(
+                pointer: target.row.pointer,
+                label: target.row.label,
+                node: target.row.node
+            ) { value in
+                editor?.replace(at: target.row.pointer, with: value)
+            }
+        }
+    }
+
+    /// Wraps a row so it can drive `sheet(item:)`, which needs identity.
+    struct EditTarget: Identifiable {
+        let row: JSONTreeRow.Row
+        var id: String { row.path }
+    }
+
+    /// What can be done to one node, named as intentions rather than as patch
+    /// mechanics — nobody thinks "replace /data/items with []", they think
+    /// "make this list empty".
+    @ViewBuilder
+    private func actions(for row: JSONTreeRow.Row) -> some View {
+        if let editor, editor.canEdit {
+            if !row.isContainer {
+                Button {
+                    editing = EditTarget(row: row)
+                } label: {
+                    Label("Edit value…", systemImage: "pencil")
+                }
+                Button {
+                    editor.setNull(at: row.pointer)
+                } label: {
+                    Label("Set to null", systemImage: "circle.slash")
+                }
+            }
+
+            if row.isContainer {
+                Button {
+                    editor.empty(row.node, at: row.pointer)
+                } label: {
+                    Label(
+                        row.isArray ? "Empty this list" : "Empty this object",
+                        systemImage: "tray"
+                    )
+                }
+            }
+
+            // Only inside an array, where duplicating means something: copies
+            // rows the server actually sent, so a paginated screen can be
+            // pushed past its page size without inventing data.
+            if row.isArrayElement {
+                Button {
+                    editor.duplicate(row.node, at: row.pointer, times: 10)
+                } label: {
+                    Label("Duplicate ×10", systemImage: "plus.square.on.square")
+                }
+                Button {
+                    editor.duplicate(row.node, at: row.pointer, times: 100)
+                } label: {
+                    Label("Duplicate ×100", systemImage: "plus.square.on.square")
+                }
+            }
+
+            // Never the root: removing it leaves no document to edit.
+            if !row.pointer.isRoot {
+                Button(role: .destructive) {
+                    editor.remove(at: row.pointer)
+                } label: {
+                    Label("Remove", systemImage: "trash")
+                }
+            }
+        }
+    }
+
+    private func reflatten(from node: JSONNode) {
+        var output: [JSONTreeRow.Row] = []
+        JSONTree.flatten(
+            node, label: nil, pointer: JSONPointer(tokens: []),
+            depth: 0, collapsed: collapsed, into: &output
+        )
+        rows = output
     }
 
     /// Expands or collapses one container, touching only its own subtree.
@@ -87,11 +180,13 @@ struct JSONTreeView: View {
             // and reading `@State` back mid-update is not something to rely on.
             var updated = collapsed
             updated.remove(row.path)
-            updated.formUnion(JSONTree.childContainerPaths(of: row.node, path: row.path))
+            updated.formUnion(
+                JSONTree.childContainerPaths(of: row.node, pointer: row.pointer)
+            )
 
             var inserted: [JSONTreeRow.Row] = []
             JSONTree.flattenChildren(
-                of: row.node, path: row.path, depth: row.depth,
+                of: row.node, pointer: row.pointer, depth: row.depth,
                 collapsed: updated, into: &inserted
             )
             collapsed = updated
@@ -109,13 +204,37 @@ struct JSONTreeView: View {
 struct JSONTreeRow: View {
 
     struct Row: Sendable {
-        let path: String
+        /// Where this node lives, as a real JSON Pointer.
+        ///
+        /// Was a hand-built `String`, which looked like a pointer and was not:
+        /// paths were interpolated without escaping while
+        /// `JSONPointer.init(string:)` *unescapes* on the way back in, so a
+        /// response key containing `/` or `~` resolved to the wrong node — or
+        /// to nothing — with no error anywhere. Now that edits address nodes by
+        /// pointer, that silent mismatch would corrupt the wrong field.
+        let pointer: JSONPointer
         /// Key, or array index. `nil` for the root.
         let label: String?
         let node: JSONNode
         let depth: Int
 
+        /// Row identity and collapse-set key. Escaped, so it round-trips.
+        var path: String { pointer.description }
+
         var isContainer: Bool { node.isContainer }
+
+        /// True when this node sits inside an array, which is what makes
+        /// "duplicate" a coherent thing to offer. An array index is the only
+        /// pointer token that is all digits.
+        var isArrayElement: Bool {
+            guard let token = pointer.lastToken else { return false }
+            return !token.isEmpty && token.allSatisfy(\.isNumber)
+        }
+
+        var isArray: Bool {
+            if case .array = node { return true }
+            return false
+        }
     }
 
     let row: Row

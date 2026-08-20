@@ -38,6 +38,16 @@ public enum NetworkLens {
 
     public static func record(_ exchange: NetworkExchange) {}
 
+    /// Always a miss, and says so with an empty list rather than pretending it
+    /// applied. A UI test asserting `isApplied` against a release build should
+    /// fail loudly — that build has no mocking engine to apply anything with.
+    @discardableResult
+    public static func applyScenario(named name: String) -> ScenarioActivation {
+        .noSuchScenario(name: name, available: [])
+    }
+
+    public static var launchScenarioActivation: ScenarioActivation? { nil }
+
     /// Hands the request straight back. Nothing reads the tag in a release
     /// build, and a stamped `URLProtocol` property on a request nobody
     /// intercepts is dead weight on every call site that attributes traffic.

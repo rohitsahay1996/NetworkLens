@@ -45,10 +45,24 @@ public final class Scenarios: @unchecked Sendable {
         return candidate
     }
 
+    /// The scenario saved under this name, if there is one.
+    ///
+    /// Compared case- and whitespace-insensitively. Exact matching was fine
+    /// while the only caller was a picker holding the string it had just read
+    /// back; a name now also arrives from a launch argument or a scheme's
+    /// environment, where a trailing space is invisible and a capital letter is
+    /// a coin toss. A lookup that misses for either reason reads as the
+    /// scenario having been lost.
     public func scenario(named name: String) -> Scenario? {
+        let needle = Self.lookupKey(name)
+        guard !needle.isEmpty else { return nil }
         lock.lock()
         defer { lock.unlock() }
-        return storage.first { $0.name == name }
+        return storage.first { Self.lookupKey($0.name) == needle }
+    }
+
+    private static func lookupKey(_ name: String) -> String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     // MARK: - Editing

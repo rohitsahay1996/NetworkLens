@@ -38,6 +38,13 @@ public enum NetworkLens {
             Mocks.shared.clearForRelaunch()
         }
 
+        // After the restore, never before: a launch argument names a scenario
+        // by the name it was saved under, and nothing has been read off disk
+        // until the line above runs.
+        if let named = LensLaunchOptions.scenarioName() {
+            state.noteLaunchScenario(applyScenario(named: named))
+        }
+
         // Covers URLSession.shared, which honours globally registered
         // protocols but has a configuration the app cannot reach.
         URLProtocol.registerClass(LensURLProtocol.self)
@@ -51,6 +58,32 @@ public enum NetworkLens {
             // the delegate queue's screen, which is nobody's screen.
             LensSwizzler.installTaskHooks()
         }
+    }
+
+    /// Applies a saved scenario by name, for a caller that has no UI.
+    ///
+    /// The entry point a UI test drives. Returns rather than throws, and
+    /// reports a miss as data rather than silence, so a test can assert that
+    /// the state it asked for is the state it got:
+    ///
+    /// ```swift
+    /// XCTAssertTrue(NetworkLens.applyScenario(named: "cart empty").isApplied)
+    /// ```
+    @discardableResult
+    public static func applyScenario(named name: String) -> ScenarioActivation {
+        guard let scenario = Scenarios.shared.scenario(named: name) else {
+            return .noSuchScenario(name: name, available: Scenarios.shared.all.map(\.name))
+        }
+        return .applied(name: scenario.name, outcome: Scenarios.shared.apply(scenario))
+    }
+
+    /// What the launch argument did, if one was given.
+    ///
+    /// Kept so the overlay can say so out loud. A scenario that was asked for
+    /// and not found has to be visible somewhere, or the app simply behaves
+    /// like the tool is not installed.
+    public static var launchScenarioActivation: ScenarioActivation? {
+        state.launchScenarioActivation
     }
 
     /// Explicit install, for apps that build their own session configuration
@@ -197,6 +230,7 @@ final class LensState: @unchecked Sendable {
     private var _clock: LensClock = SystemClock()
     private var _uninterceptable: [String] = []
     private var _blockedRewrites: [String] = []
+    private var _launchScenarioActivation: ScenarioActivation?
 
     let store = ExchangeStore()
 
@@ -210,6 +244,18 @@ final class LensState: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return _blockedRewrites
+    }
+
+    var launchScenarioActivation: ScenarioActivation? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _launchScenarioActivation
+    }
+
+    func noteLaunchScenario(_ activation: ScenarioActivation) {
+        lock.lock()
+        _launchScenarioActivation = activation
+        lock.unlock()
     }
 
     func noteBlockedRewrite(_ description: String) {

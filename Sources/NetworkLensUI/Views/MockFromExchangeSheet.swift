@@ -47,7 +47,9 @@ struct MockFromExchangeSheet: View {
     @State private var matchesQuery = false
     @State private var isEditingOversizeBody = false
     @State private var isEditingOversizeRequest = false
+    @State private var isEditingBodyAsText = false
     @StateObject private var validity = JSONValidity()
+    @StateObject private var session = BodyEditSession()
 
     init(exchange: NetworkExchange, mode: Mode = .edit) {
         self.exchange = exchange
@@ -147,14 +149,33 @@ struct MockFromExchangeSheet: View {
                 }
 
                 Section {
-                    editor(
-                        text: $bodyText,
-                        minHeight: 200,
-                        isOversizeUnlocked: $isEditingOversizeBody,
-                        onChange: { validity.check($0) }
-                    )
+                    if session.canEdit, !isEditingBodyAsText, let tree = session.tree {
+                        JSONTreeView(tree: tree, editor: session)
+                        stagedEdits
+                    } else {
+                        editor(
+                            text: $bodyText,
+                            minHeight: 200,
+                            isOversizeUnlocked: $isEditingOversizeBody,
+                            onChange: { validity.check($0) }
+                        )
+                    }
                 } header: {
-                    Text("Body")
+                    HStack {
+                        Text("Body")
+                        Spacer()
+                        // The text path never goes away. A malformed payload is
+                        // a legitimate thing to mock, and no tree can express
+                        // one — `bodyFooter` has always said so.
+                        if session.canEdit {
+                            Button(isEditingBodyAsText ? "Edit fields" : "Edit as text") {
+                                if isEditingBodyAsText { session.load(Data(bodyText.utf8)) }
+                                isEditingBodyAsText.toggle()
+                            }
+                            .font(.caption)
+                            .textCase(nil)
+                        }
+                    }
                 } footer: {
                     Text(bodyFooter)
                 }
@@ -198,6 +219,14 @@ struct MockFromExchangeSheet: View {
                 requestText = Self.text(from: saved)
             }
             validity.check(bodyText)
+            session.load(Data(bodyText.utf8))
+        }
+        // One source of truth stays `bodyText` — `save()` builds the mock from
+        // it and is untouched by any of this. The tree is a nicer way to write
+        // into it, not a second place the body lives.
+        .onChange(of: session.ops) { _ in
+            guard let edited = session.prettyText else { return }
+            bodyText = edited
         }
     }
 
@@ -327,6 +356,45 @@ struct MockFromExchangeSheet: View {
         bodyText = Self.text(from: exchange.response?.body)
         requestText = Self.text(from: exchange.request.body)
         delay = "0"
+        session.load(exchange.response?.body)
+    }
+
+    /// What has been changed, in the payload's own words.
+    ///
+    /// Reuses `PatchOp.summary`, which the perturbation audit trail already
+    /// renders for humans — the edit reads the same here as it will in the bug
+    /// report it ends up in.
+    @ViewBuilder
+    private var stagedEdits: some View {
+        if let failure = session.failure {
+            Label(failure, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+        }
+
+        if session.isEdited {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(session.ops) { op in
+                    Text(op.summary)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                HStack(spacing: 18) {
+                    Button("Undo") { session.undo() }
+                    Button("Revert all") { session.revert() }
+                    Spacer(minLength: 0)
+                    Text("\(session.ops.count) \(session.ops.count == 1 ? "edit" : "edits")")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption)
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor)
+            }
+            .padding(.top, 4)
+        }
     }
 
     /// The picker and the free-text field share one `String` state, so a preset

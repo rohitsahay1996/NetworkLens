@@ -113,12 +113,21 @@ struct JSONTree: Sendable {
     /// Only what is visible under `collapsed`.
     let rows: [JSONTreeRow.Row]
 
-    init(node: JSONNode) {
+    /// Re-flattens a payload, optionally against collapse state that is already
+    /// on screen.
+    ///
+    /// `collapsed` is passed back in while editing: re-deriving it would fold
+    /// the tree back to two levels under the tester on every keystroke, closing
+    /// the very branch they are working in.
+    init(node: JSONNode, collapsed existing: Set<String>? = nil) {
         self.node = node
-        let collapsed = Self.initiallyCollapsed(node)
+        let collapsed = existing ?? Self.initiallyCollapsed(node)
         self.collapsed = collapsed
         var rows: [JSONTreeRow.Row] = []
-        Self.flatten(node, label: nil, path: "", depth: 0, collapsed: collapsed, into: &rows)
+        Self.flatten(
+            node, label: nil, pointer: JSONPointer(tokens: []),
+            depth: 0, collapsed: collapsed, into: &rows
+        )
         self.rows = rows
     }
 
@@ -130,14 +139,17 @@ struct JSONTree: Sendable {
     static func flatten(
         _ node: JSONNode,
         label: String?,
-        path: String,
+        pointer: JSONPointer,
         depth: Int,
         collapsed: Set<String>,
         into output: inout [JSONTreeRow.Row]
     ) {
-        output.append(JSONTreeRow.Row(path: path, label: label, node: node, depth: depth))
-        guard node.isContainer, !collapsed.contains(path) else { return }
-        flattenChildren(of: node, path: path, depth: depth, collapsed: collapsed, into: &output)
+        let row = JSONTreeRow.Row(pointer: pointer, label: label, node: node, depth: depth)
+        output.append(row)
+        guard node.isContainer, !collapsed.contains(row.path) else { return }
+        flattenChildren(
+            of: node, pointer: pointer, depth: depth, collapsed: collapsed, into: &output
+        )
     }
 
     /// The rows a container contributes below itself, without the container's
@@ -145,7 +157,7 @@ struct JSONTree: Sendable {
     /// rather than the whole payload.
     static func flattenChildren(
         of node: JSONNode,
-        path: String,
+        pointer: JSONPointer,
         depth: Int,
         collapsed: Set<String>,
         into output: inout [JSONTreeRow.Row]
@@ -154,14 +166,14 @@ struct JSONTree: Sendable {
         case .object(let entries):
             for entry in entries {
                 flatten(
-                    entry.value, label: entry.key, path: "\(path)/\(entry.key)",
+                    entry.value, label: entry.key, pointer: pointer.appending(entry.key),
                     depth: depth + 1, collapsed: collapsed, into: &output
                 )
             }
         case .array(let elements):
             for (index, element) in elements.enumerated() {
                 flatten(
-                    element, label: "\(index)", path: "\(path)/\(index)",
+                    element, label: "\(index)", pointer: pointer.appending("\(index)"),
                     depth: depth + 1, collapsed: collapsed, into: &output
                 )
             }
@@ -177,16 +189,16 @@ struct JSONTree: Sendable {
     /// tap, is what lets `initiallyCollapsed` stop at the first collapsed
     /// container instead of walking every node in the payload to record paths
     /// no row will ever ask about.
-    static func childContainerPaths(of node: JSONNode, path: String) -> Set<String> {
+    static func childContainerPaths(of node: JSONNode, pointer: JSONPointer) -> Set<String> {
         var output: Set<String> = []
         switch node {
         case .object(let entries):
             for entry in entries where entry.value.isContainer {
-                output.insert("\(path)/\(entry.key)")
+                output.insert(pointer.appending(entry.key).description)
             }
         case .array(let elements):
             for (index, element) in elements.enumerated() where element.isContainer {
-                output.insert("\(path)/\(index)")
+                output.insert(pointer.appending("\(index)").description)
             }
         default:
             break
@@ -202,10 +214,10 @@ struct JSONTree: Sendable {
     /// the problem the tree was supposed to solve.
     static func initiallyCollapsed(_ node: JSONNode, maxExpandedDepth: Int = 2) -> Set<String> {
         var output: Set<String> = []
-        func walk(_ node: JSONNode, path: String, depth: Int) {
+        func walk(_ node: JSONNode, pointer: JSONPointer, depth: Int) {
             guard node.isContainer else { return }
             if depth >= maxExpandedDepth {
-                output.insert(path)
+                output.insert(pointer.description)
                 // Nothing under a collapsed container is ever drawn until it is
                 // expanded, and expanding re-derives its children's state from
                 // the same rule. Walking on would visit every node in the
@@ -215,17 +227,17 @@ struct JSONTree: Sendable {
             switch node {
             case .object(let entries):
                 for entry in entries {
-                    walk(entry.value, path: "\(path)/\(entry.key)", depth: depth + 1)
+                    walk(entry.value, pointer: pointer.appending(entry.key), depth: depth + 1)
                 }
             case .array(let elements):
                 for (index, element) in elements.enumerated() {
-                    walk(element, path: "\(path)/\(index)", depth: depth + 1)
+                    walk(element, pointer: pointer.appending("\(index)"), depth: depth + 1)
                 }
             default:
                 break
             }
         }
-        walk(node, path: "", depth: 0)
+        walk(node, pointer: JSONPointer(tokens: []), depth: 0)
         return output
     }
 }

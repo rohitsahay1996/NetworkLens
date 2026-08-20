@@ -948,6 +948,36 @@ public final class Scenarios: @unchecked Sendable {
     }
 }
 
+/// Inert mirror of the launch-option reader.
+///
+/// Returns nothing rather than parsing: a release build has no scenarios to
+/// name, so honouring the argument would mean shipping the mocking engine to
+/// production to be told there is nothing to apply.
+public enum LensLaunchOptions {
+
+    public static let scenarioFlag = "-NetworkLensScenario"
+    public static let scenarioEnvironmentKey = "NETWORKLENS_SCENARIO"
+
+    public static func scenarioName(
+        arguments: [String] = ProcessInfo.processInfo.arguments,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String? { nil }
+}
+
+/// Inert mirror of the activation result.
+public enum ScenarioActivation: Sendable, Equatable {
+
+    case applied(name: String, outcome: Scenarios.Outcome)
+    case noSuchScenario(name: String, available: [String])
+
+    public var isApplied: Bool {
+        if case .applied = self { return true }
+        return false
+    }
+
+    public var summary: String { "" }
+}
+
 /// Mirror of cURL export. Nothing is captured in a release build, so there is
 /// nothing to render.
 public enum CurlExport {
