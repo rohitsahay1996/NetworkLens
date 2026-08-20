@@ -31,6 +31,11 @@ struct BreakpointSheet: View {
     @State private var statusCode = ""
     @State private var loadedFor: UUID?
     @State private var now = Date()
+    /// Measured once per load. `String.utf8.count` walks the whole buffer, and
+    /// this is read from `body` — which the countdown redraws twice a second.
+    @State private var bodyByteCount = 0
+    @State private var isEditingOversizeBody = false
+    @StateObject private var validity = JSONValidity()
 
     private let tick = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
@@ -59,16 +64,11 @@ struct BreakpointSheet: View {
                 }
 
                 Section {
-                    TextEditor(text: $bodyText)
-                        .font(.system(.footnote, design: .monospaced))
-                        .frame(minHeight: 180)
-                        .onChange(of: bodyText) { _ in stageEdit() }
+                    bodyEditor
                 } header: {
                     Text("Body")
                 } footer: {
-                    Text(isEditableJSON
-                        ? "Edited as text. Malformed JSON is sent as-is — mocking a broken payload is a legitimate thing to do."
-                        : "This body is not JSON. Editing it as text may produce something the app cannot decode.")
+                    Text(bodyFooter)
                 }
 
                 Section {
@@ -176,20 +176,55 @@ struct BreakpointSheet: View {
             bodyText = ""
             statusCode = ""
         }
+        bodyByteCount = bodyText.utf8.count
+        isEditingOversizeBody = false
+        validity.check(bodyText)
+    }
+
+    // MARK: - Body editor
+
+    /// The buffer is always loaded, even when it is too big to edit: `resume`
+    /// rebuilds the payload from it, and an editor that quietly held only part
+    /// of the body would send a truncated response to the app under test.
+    /// Only the `TextEditor` is withheld.
+    @ViewBuilder
+    private var bodyEditor: some View {
+        if bodyByteCount > BodyEditorLimit.bytes, !isEditingOversizeBody {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(bodyText.prefix(BodyEditorLimit.previewCharacters) + "\n…")
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Button("Edit anyway") { isEditingOversizeBody = true }
+                    .font(.footnote)
+            }
+        } else {
+            TextEditor(text: $bodyText)
+                .font(.system(.footnote, design: .monospaced))
+                .frame(minHeight: 180)
+                .onChange(of: bodyText) { newValue in
+                    stageEdit()
+                    validity.check(newValue)
+                }
+        }
+    }
+
+    private var bodyFooter: String {
+        if bodyByteCount > BodyEditorLimit.bytes, !isEditingOversizeBody {
+            return "\(formatBytes(bodyByteCount)) — shown as a preview. A text editor "
+                + "re-lays its whole buffer on every keystroke, so editing this in place "
+                + "would freeze the sheet. Resuming sends the held body untouched."
+        }
+        return validity.isValid
+            ? "Edited as text. Malformed JSON is sent as-is — mocking a broken payload is a legitimate thing to do."
+            : "This body is not JSON. Editing it as text may produce something the app cannot decode."
     }
 
     /// Reformatted through the ordered serializer so key order survives a
-    /// round trip; raw text for anything that is not JSON.
+    /// round trip; raw text for anything that is not JSON. Cached by payload —
+    /// `load()` is guarded per breakpoint, but the same body comes back every
+    /// time a queued hold is revisited.
     private func text(from data: Data?) -> String {
-        guard let data, !data.isEmpty else { return "" }
-        if let node = try? JSONNodeParser.parse(data) {
-            return JSONNodeSerializer.string(from: node, format: .pretty)
-        }
-        return String(data: data, encoding: .utf8) ?? ""
-    }
-
-    private var isEditableJSON: Bool {
-        (try? JSONNodeParser.parse(Data(bodyText.utf8))) != nil
+        BodyText.pretty(from: data)
     }
 
     // MARK: - Editing

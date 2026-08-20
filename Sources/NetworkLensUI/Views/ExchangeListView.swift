@@ -13,10 +13,25 @@ import NetworkLensCore
 struct ExchangeListView: View {
 
     @EnvironmentObject private var lens: LensObservable
+    @ObservedObject private var filter = HostFilter.shared
     @State private var query = ""
     @State private var groupsByScreen = false
+    @State private var isFilterPresented = false
 
     var body: some View {
+        VStack(spacing: 0) {
+            // Pinned above the list rather than parked in the navigation bar.
+            // The bar's leading side already carries Done and the grouping
+            // toggle, so a third icon there is squeezed against the title and
+            // routinely missed — and a filter nobody can find is a filter that
+            // gets left on. Here it also states what it is doing.
+            filterBar
+            Divider()
+            list
+        }
+    }
+
+    private var list: some View {
         List {
             if groupsByScreen {
                 ForEach(groupedResults, id: \.screen) { group in
@@ -28,8 +43,10 @@ struct ExchangeListView: View {
                             Spacer()
                             // Re-fires the screen's calls together, which is
                             // the only way to reproduce their interleaving.
+                            // Fired from the group as shown, so a host hidden
+                            // by the filter is not silently replayed with it.
                             Button {
-                                lens.replayScreen(group.screen)
+                                lens.replay(Array(group.exchanges.reversed()))
                             } label: {
                                 Label("Replay all", systemImage: "arrow.clockwise")
                                     .font(.caption2)
@@ -40,7 +57,7 @@ struct ExchangeListView: View {
                             // A screen's traffic as one block, which is the
                             // unit a bug report is usually about.
                             Button {
-                                lens.copyCurl(forScreen: group.screen)
+                                lens.copyCurl(for: Array(group.exchanges.reversed()))
                             } label: {
                                 Label("Copy", systemImage: "doc.on.doc")
                                     .font(.caption2)
@@ -68,16 +85,11 @@ struct ExchangeListView: View {
         ) {
             Button("OK", role: .cancel) { lens.notice = nil }
         }
+        .sheet(isPresented: $isFilterPresented) {
+            HostFilterSheet(filter: filter).environmentObject(lens)
+        }
         .overlay {
-            if results.isEmpty {
-                EmptyStateView(
-                    title: query.isEmpty ? "No traffic yet" : "No matches",
-                    message: query.isEmpty
-                        ? "Requests appear here as the app makes them."
-                        : "Nothing captured matches “\(query)”.",
-                    systemImage: "antenna.radiowaves.left.and.right"
-                )
-            }
+            if results.isEmpty { emptyState }
         }
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
@@ -166,15 +178,107 @@ struct ExchangeListView: View {
         }
     }
 
+    /// Always-visible entry to the host filter, reading as its own state.
+    ///
+    /// Says how many hosts are showing rather than only that a filter exists:
+    /// traffic missing from the list is otherwise indistinguishable from
+    /// capture having stopped working, which is the single worst thing a
+    /// debugging tool can be ambiguous about.
+    private var filterBar: some View {
+        HStack(spacing: 8) {
+            Button {
+                isFilterPresented = true
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: hiddenHostCount > 0
+                        ? "line.3.horizontal.decrease.circle.fill"
+                        : "line.3.horizontal.decrease.circle")
+                    Text(filterLabel)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.semibold))
+                }
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(hiddenHostCount > 0 ? Color.accentColor : Color.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Spacer(minLength: 8)
+
+            // One tap back to everything, without opening the sheet to find it.
+            if hiddenHostCount > 0 {
+                Button("Show all") { filter.showAll() }
+                    .font(.footnote)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(Color(.secondarySystemBackground))
+    }
+
+    private var filterLabel: String {
+        let total = hostCount
+        guard hiddenHostCount > 0 else {
+            return total == 0 ? "All hosts" : "All \(total) hosts"
+        }
+        return "\(total - hiddenHostCount) of \(total) hosts"
+    }
+
+    private var hostCount: Int {
+        Set(lens.exchanges.map(\.hostLabel)).count
+    }
+
     private var results: [NetworkExchange] {
-        let all = lens.exchanges
-        guard !query.isEmpty else { return all }
+        let visible = lens.exchanges.filter { filter.isVisible($0.hostLabel) }
+        guard !query.isEmpty else { return visible }
         let needle = query.lowercased()
-        return all.filter {
+        return visible.filter {
             $0.endpointKey.lowercased().contains(needle)
                 || $0.request.url.absoluteString.lowercased().contains(needle)
                 || ($0.screen?.lowercased().contains(needle) ?? false)
         }
+    }
+
+    /// Counted against what is actually in the buffer. A host hidden before
+    /// `Clear` would otherwise keep the filter badge lit over nothing.
+    private var hiddenHostCount: Int {
+        filter.activeHidden(among: lens.exchanges.map(\.hostLabel)).count
+    }
+
+    /// Says which of the three reasons the list is empty for. "No traffic yet"
+    /// in front of a tester who has just hidden every host is the tool lying
+    /// about its own state.
+    @ViewBuilder
+    private var emptyState: some View {
+        if lens.exchanges.isEmpty {
+            EmptyStateView(
+                title: "No traffic yet",
+                message: "Requests appear here as the app makes them.",
+                systemImage: "antenna.radiowaves.left.and.right"
+            )
+        } else if filteredOutEverything {
+            EmptyStateView(
+                title: "Every host is hidden",
+                message: "\(hiddenHostCount) \(hiddenHostCount == 1 ? "host is" : "hosts are") "
+                    + "filtered out. Tap the filter to bring them back.",
+                systemImage: "line.3.horizontal.decrease.circle.fill"
+            )
+        } else {
+            EmptyStateView(
+                title: "No matches",
+                message: "Nothing captured matches “\(query)”.",
+                systemImage: "antenna.radiowaves.left.and.right"
+            )
+        }
+    }
+
+    /// True when the filter, rather than the search field, is what emptied the
+    /// list.
+    private var filteredOutEverything: Bool {
+        !lens.exchanges.isEmpty && !lens.exchanges.contains { filter.isVisible($0.hostLabel) }
     }
 
     private var groupedResults: [(screen: String, exchanges: [NetworkExchange])] {

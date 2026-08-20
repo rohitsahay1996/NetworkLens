@@ -7,6 +7,7 @@
 
 #if canImport(UIKit)
 import SwiftUI
+import UIKit
 import NetworkLensCore
 
 /// Provenance badge. Anything the tool synthesised is tinted the same, so a
@@ -108,6 +109,11 @@ enum BodyViewMode: String, CaseIterable {
 
 /// Renders a body according to what it actually is, rather than forcing every
 /// payload through a JSON parser and showing mojibake when it is not JSON.
+///
+/// The payload is classified, parsed and laid out once, off the main thread,
+/// and the result is cached — see `RenderedBody`. Everything here is a read of
+/// that result, so a store notification arriving while this is on screen costs
+/// a redraw rather than another parse of a megabyte.
 struct BodyView: View {
 
     let data: Data?
@@ -118,40 +124,83 @@ struct BodyView: View {
     /// raw text does not have to re-pick it on every row they open.
     @AppStorage("com.networklens.bodyViewMode") private var mode: BodyViewMode = .tree
 
+    @State private var rendered: RenderedBody?
+
+    private var fingerprint: BodyFingerprint {
+        BodyFingerprint(data: data, contentType: contentType)
+    }
+
     var body: some View {
-        switch presentation {
+        Group {
+            if let rendered {
+                content(rendered)
+            } else {
+                // Only reached for a body big enough to have gone to a
+                // background task. A small one is ready on the next frame.
+                HStack(spacing: 6) {
+                    ProgressView()
+                    Text("Reading \(formatBytes(data?.count ?? 0))…")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .task(id: fingerprint) { await load() }
+    }
+
+    /// Renders off the main thread once the payload is large enough for the
+    /// hop to be cheaper than the parse. Small bodies stay inline: a detached
+    /// task costs a frame, and most captured bodies are a few kilobytes.
+    private func load() async {
+        let fingerprint = self.fingerprint
+        if let cached = BodyRenderCache.shared.value(for: fingerprint) {
+            rendered = cached
+            return
+        }
+
+        let data = self.data
+        let contentType = self.contentType
+        let built: RenderedBody
+        if fingerprint.isLarge {
+            built = await Task.detached(priority: .userInitiated) {
+                RenderedBody.make(data: data, contentType: contentType)
+            }.value
+        } else {
+            built = RenderedBody.make(data: data, contentType: contentType)
+        }
+
+        guard !Task.isCancelled else { return }
+        BodyRenderCache.shared.store(built, for: fingerprint)
+        rendered = built
+    }
+
+    @ViewBuilder
+    private func content(_ rendered: RenderedBody) -> some View {
+        switch rendered.kind {
         case .empty:
             Text("No body").foregroundStyle(.secondary).font(.footnote)
 
-        case .json:
+        case .json(let tree):
             VStack(alignment: .leading, spacing: 8) {
                 Picker("View", selection: $mode) {
                     ForEach(BodyViewMode.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.segmented)
 
-                if truncated {
-                    Label("Truncated by the capture cap", systemImage: "scissors")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                }
+                truncationNotice
 
-                switch mode {
-                case .tree:
-                    if let node = parsed {
-                        JSONTreeView(node: node)
-                    } else {
-                        // Truncation cuts a body mid-token, so the capture is
-                        // real but unparseable. Raw is the honest fallback.
-                        scrollingText(rawText)
-                    }
-                case .raw:
-                    scrollingText(prettyJSON)
+                if mode == .tree {
+                    JSONTreeView(tree: tree).id(fingerprint)
+                } else {
+                    PagedTextView(lines: rendered.lines).id(fingerprint)
                 }
             }
 
-        case .text(let text):
-            scrollingText(text)
+        case .text:
+            VStack(alignment: .leading, spacing: 4) {
+                truncationNotice
+                PagedTextView(lines: rendered.lines).id(fingerprint)
+            }
 
         case .binary(let byteCount, let hexPreview):
             VStack(alignment: .leading, spacing: 6) {
@@ -165,39 +214,68 @@ struct BodyView: View {
         }
     }
 
-    private var presentation: BodyPresentation {
-        (data ?? Data()).bodyPresentation(contentType: contentType)
+    @ViewBuilder
+    private var truncationNotice: some View {
+        if truncated {
+            Label("Truncated by the capture cap", systemImage: "scissors")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+        }
     }
+}
 
-    private var parsed: JSONNode? {
-        guard let data else { return nil }
-        return try? JSONNodeParser.parse(data)
-    }
+/// Monospaced text, drawn a page of lines at a time.
+///
+/// One `Text` holding the whole payload is what the raw view used to be, and
+/// TextKit lays a string out in full before the first frame — a megabyte of
+/// pretty-printed JSON is several seconds of frozen main thread, and enabling
+/// selection on it makes that worse. Lines are pre-split by `RenderedBody`;
+/// this only decides how many of them to hand to SwiftUI.
+struct PagedTextView: View {
 
-    private var rawText: String {
-        guard let data else { return "" }
-        return String(data: data, encoding: .utf8) ?? ""
-    }
+    let lines: [RenderedBody.Line]
 
-    /// Reformatted through the ordered serializer, so key order and number
-    /// literals survive — a pretty-printer that reorders keys makes a diff
-    /// against the server's response useless.
-    private var prettyJSON: String {
-        guard let data, let node = try? JSONNodeParser.parse(data) else { return "" }
-        return JSONNodeSerializer.string(from: node, format: .pretty)
-    }
+    @State private var visible = PagedTextView.pageSize
 
-    private func scrollingText(_ text: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if truncated {
-                Label("Truncated by the capture cap", systemImage: "scissors")
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
-            }
+    private static let pageSize = 300
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(text)
-                    .font(.system(.footnote, design: .monospaced))
-                    .textSelection(.enabled)
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(lines.prefix(visible)) { line in
+                        Text(line.text)
+                            .font(.system(.footnote, design: .monospaced))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                }
+                .textSelection(.enabled)
+            }
+
+            if lines.count > visible {
+                HStack(spacing: 12) {
+                    Button("Show \(min(Self.pageSize, lines.count - visible)) more") {
+                        visible += Self.pageSize
+                    }
+                    // The way out of paging: the whole payload, in one action,
+                    // to somewhere that can actually hold it. Drawing it here
+                    // is the thing being avoided.
+                    Button("Copy all") {
+                        #if canImport(UIKit)
+                        UIPasteboard.general.string = lines
+                            .map(\.text)
+                            .joined(separator: "\n")
+                        #endif
+                    }
+                }
+                .font(.caption2)
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor)
+
+                Text("\(lines.count - visible) of \(lines.count) lines hidden")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
     }

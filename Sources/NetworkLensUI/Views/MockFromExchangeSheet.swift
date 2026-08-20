@@ -45,6 +45,9 @@ struct MockFromExchangeSheet: View {
     @State private var name: String
     @State private var requestText: String
     @State private var matchesQuery = false
+    @State private var isEditingOversizeBody = false
+    @State private var isEditingOversizeRequest = false
+    @StateObject private var validity = JSONValidity()
 
     init(exchange: NetworkExchange, mode: Mode = .edit) {
         self.exchange = exchange
@@ -96,9 +99,11 @@ struct MockFromExchangeSheet: View {
 
                 if hasRequestBody {
                     Section {
-                        TextEditor(text: $requestText)
-                            .font(.system(.footnote, design: .monospaced))
-                            .frame(minHeight: 120)
+                        editor(
+                            text: $requestText,
+                            minHeight: 120,
+                            isOversizeUnlocked: $isEditingOversizeRequest
+                        )
                     } header: {
                         Text("Request · \(exchange.request.method)")
                     } footer: {
@@ -142,9 +147,12 @@ struct MockFromExchangeSheet: View {
                 }
 
                 Section {
-                    TextEditor(text: $bodyText)
-                        .font(.system(.footnote, design: .monospaced))
-                        .frame(minHeight: 200)
+                    editor(
+                        text: $bodyText,
+                        minHeight: 200,
+                        isOversizeUnlocked: $isEditingOversizeBody,
+                        onChange: { validity.check($0) }
+                    )
                 } header: {
                     Text("Body")
                 } footer: {
@@ -189,6 +197,7 @@ struct MockFromExchangeSheet: View {
             if let saved = existingRule?.requestSample {
                 requestText = Self.text(from: saved)
             }
+            validity.check(bodyText)
         }
     }
 
@@ -219,13 +228,50 @@ struct MockFromExchangeSheet: View {
 
     private var bodyFooter: String {
         guard !bodyText.isEmpty else { return "An empty body, for a 204 or an error the app ignores." }
-        return isValidJSON
+        if isOversize(bodyText), !isEditingOversizeBody {
+            return "\(formatBytes(bodyText.utf8.count)) — shown as a preview. A text editor "
+                + "re-lays its whole buffer on every keystroke, so editing this in place would "
+                + "freeze the sheet. Saved unchanged, this mock replays the captured body exactly."
+        }
+        return validity.isValid
             ? "Served as-is. Content-Length is recomputed at delivery, so an edited body cannot truncate."
             : "This is not valid JSON. It is served anyway — mocking a malformed payload is a legitimate thing to do."
     }
 
-    private var isValidJSON: Bool {
-        (try? JSONNodeParser.parse(Data(bodyText.utf8))) != nil
+    // MARK: - Editors
+
+    /// A body editor that withholds the `TextEditor` until asked, once the
+    /// buffer is large enough that `TextEditor` cannot keep up with typing.
+    ///
+    /// The buffer itself is always loaded — `save()` builds the mock from it,
+    /// and an editor holding only part of the body would save a truncated mock.
+    @ViewBuilder
+    private func editor(
+        text: Binding<String>,
+        minHeight: CGFloat,
+        isOversizeUnlocked: Binding<Bool>,
+        onChange: @escaping (String) -> Void = { _ in }
+    ) -> some View {
+        if isOversize(text.wrappedValue), !isOversizeUnlocked.wrappedValue {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(text.wrappedValue.prefix(BodyEditorLimit.previewCharacters) + "\n…")
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Button("Edit anyway") { isOversizeUnlocked.wrappedValue = true }
+                    .font(.footnote)
+            }
+        } else {
+            TextEditor(text: text)
+                .font(.system(.footnote, design: .monospaced))
+                .frame(minHeight: minHeight)
+                .onChange(of: text.wrappedValue) { onChange($0) }
+        }
+    }
+
+    /// `String` is UTF-8 backed, so this is a stored count rather than a walk —
+    /// unlike `String.count`, which counts graphemes.
+    private func isOversize(_ text: String) -> Bool {
+        text.utf8.count > BodyEditorLimit.bytes
     }
 
     // MARK: - Actions
@@ -292,12 +338,12 @@ struct MockFromExchangeSheet: View {
 
     /// Reformatted through the ordered serializer so key order and number
     /// literals survive the round trip; raw text for anything not JSON.
+    ///
+    /// Cached, because this runs in `init` — which SwiftUI re-runs whenever the
+    /// presenting view redraws — and again in `isEdited` on every evaluation of
+    /// this sheet's own `body`.
     private static func text(from data: Data?) -> String {
-        guard let data, !data.isEmpty else { return "" }
-        if let node = try? JSONNodeParser.parse(data) {
-            return JSONNodeSerializer.string(from: node, format: .pretty)
-        }
-        return String(data: data, encoding: .utf8) ?? ""
+        BodyText.pretty(from: data)
     }
 }
 

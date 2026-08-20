@@ -159,9 +159,17 @@ public final class LensObservable: ObservableObject {
     /// a time never reproduces the interleaving, and the interleaving is where
     /// the races live.
     public func replayScreen(_ screen: String) {
-        let group = exchanges
-            .filter { ($0.screen ?? "Unattributed") == screen && NetworkLens.canReplay($0) }
-            .reversed()
+        replay(Array(exchanges.filter { ($0.screen ?? "Unattributed") == screen }.reversed()))
+    }
+
+    /// Re-fires a given set of requests, oldest first, in the order given.
+    ///
+    /// Takes the exchanges rather than a screen name so a caller showing a
+    /// filtered group can replay *that* group. A "Replay all" button under a
+    /// filtered header that quietly also fires the hidden hosts is a worse bug
+    /// than no button.
+    public func replay(_ group: [NetworkExchange]) {
+        let group = group.filter { NetworkLens.canReplay($0) }
 
         Task { [weak self] in
             var failures: [NetworkExchange] = []
@@ -213,10 +221,14 @@ public final class LensObservable: ObservableObject {
 
     /// Every request a screen made, oldest first, as one block.
     public func copyCurl(forScreen screen: String) {
-        let group = exchanges
-            .filter { ($0.screen ?? "Unattributed") == screen }
-            .reversed()
-        copyToPasteboard(CurlExport.command(for: Array(group)))
+        copyCurl(for: Array(exchanges.filter { ($0.screen ?? "Unattributed") == screen }.reversed()))
+    }
+
+    /// A given set of requests as one block, in the order given. The
+    /// exchange-taking counterpart to `copyCurl(forScreen:)`, for the same
+    /// reason as `replay(_:)`.
+    public func copyCurl(for group: [NetworkExchange]) {
+        copyToPasteboard(CurlExport.command(for: group))
     }
 
     /// The package also builds for macOS, where `UIPasteboard` does not exist.

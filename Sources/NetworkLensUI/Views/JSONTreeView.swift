@@ -19,120 +19,96 @@ import NetworkLensCore
 /// rather than by nesting `DisclosureGroup`s. Nesting rebuilds the entire
 /// subtree on every toggle, which is exactly the case this is for: a payload
 /// large enough that scrolling the raw text is useless.
+///
+/// The flattening is held in state and edited in place. Deriving it in `body`
+/// re-walked the visible tree on every SwiftUI evaluation — and `body` is
+/// re-evaluated on every captured request, so simply leaving this screen open
+/// while the app kept making calls was enough to lock the main thread.
 struct JSONTreeView: View {
 
-    let node: JSONNode
+    let tree: JSONTree
 
-    /// Collapsed containers, by path. Collapsed is the exception, so a small
-    /// payload needs no interaction — but see `initiallyCollapsed`.
+    /// Collapsed containers, by path.
     @State private var collapsed: Set<String> = []
-    @State private var didSeedCollapse = false
+    /// Only what is visible under `collapsed`, maintained incrementally.
+    @State private var rows: [JSONTreeRow.Row] = []
+    /// Rows actually drawn. A single expand can uncover tens of thousands of
+    /// them, and a `List` measures every row it is handed.
+    @State private var visibleRows = Self.pageSize
+
+    private static let pageSize = 300
 
     var body: some View {
         LazyVStack(alignment: .leading, spacing: 2) {
-            ForEach(rows, id: \.path) { row in
+            ForEach(Array(0..<min(visibleRows, rows.count)), id: \.self) { index in
                 JSONTreeRow(
-                    row: row,
-                    isCollapsed: collapsed.contains(row.path),
-                    toggle: { toggle(row) }
+                    row: rows[index],
+                    isCollapsed: collapsed.contains(rows[index].path),
+                    toggle: { toggle(at: index) }
                 )
+            }
+
+            if rows.count > visibleRows {
+                Button {
+                    visibleRows += Self.pageSize
+                } label: {
+                    Text("Show \(min(Self.pageSize, rows.count - visibleRows)) more · "
+                         + "\(rows.count - visibleRows) hidden")
+                        .font(.caption2)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor)
+                .padding(.top, 4)
             }
         }
         .onAppear {
-            guard !didSeedCollapse else { return }
-            didSeedCollapse = true
-            collapsed = Self.initiallyCollapsed(node)
+            // Both halves were built off the main thread; this is an assignment.
+            guard rows.isEmpty else { return }
+            collapsed = tree.collapsed
+            rows = tree.rows
         }
     }
 
-    private func toggle(_ row: JSONTreeRow.Row) {
+    /// Expands or collapses one container, touching only its own subtree.
+    ///
+    /// Re-flattening the whole payload per tap is what a naive version does,
+    /// and on the payloads this view exists for that is the tap that drops
+    /// frames. A collapse removes a contiguous run — every descendant sits
+    /// directly below its container and is deeper than it — and an expand
+    /// inserts exactly one level.
+    private func toggle(at index: Int) {
+        guard index < rows.count else { return }
+        let row = rows[index]
         guard row.isContainer else { return }
+
         if collapsed.contains(row.path) {
-            collapsed.remove(row.path)
+            // Built in a local and assigned once: what the newly uncovered
+            // level looks like depends on the child paths added a line earlier,
+            // and reading `@State` back mid-update is not something to rely on.
+            var updated = collapsed
+            updated.remove(row.path)
+            updated.formUnion(JSONTree.childContainerPaths(of: row.node, path: row.path))
+
+            var inserted: [JSONTreeRow.Row] = []
+            JSONTree.flattenChildren(
+                of: row.node, path: row.path, depth: row.depth,
+                collapsed: updated, into: &inserted
+            )
+            collapsed = updated
+            rows.insert(contentsOf: inserted, at: index + 1)
         } else {
             collapsed.insert(row.path)
+            var end = index + 1
+            while end < rows.count, rows[end].depth > row.depth { end += 1 }
+            rows.removeSubrange((index + 1)..<end)
         }
-    }
-
-    private var rows: [JSONTreeRow.Row] {
-        var output: [JSONTreeRow.Row] = []
-        Self.flatten(node, label: nil, path: "", depth: 0, collapsed: collapsed, into: &output)
-        return output
-    }
-
-    // MARK: - Flattening
-
-    /// Walks only what is visible. A collapsed container contributes its own
-    /// row and nothing beneath it, which is what keeps a 10k-node payload
-    /// affordable to draw.
-    private static func flatten(
-        _ node: JSONNode,
-        label: String?,
-        path: String,
-        depth: Int,
-        collapsed: Set<String>,
-        into output: inout [JSONTreeRow.Row]
-    ) {
-        let isCollapsed = collapsed.contains(path)
-        output.append(
-            JSONTreeRow.Row(path: path, label: label, node: node, depth: depth)
-        )
-        guard node.isContainer, !isCollapsed else { return }
-
-        switch node {
-        case .object(let entries):
-            for entry in entries {
-                flatten(
-                    entry.value, label: entry.key, path: "\(path)/\(entry.key)",
-                    depth: depth + 1, collapsed: collapsed, into: &output
-                )
-            }
-        case .array(let elements):
-            for (index, element) in elements.enumerated() {
-                flatten(
-                    element, label: "\(index)", path: "\(path)/\(index)",
-                    depth: depth + 1, collapsed: collapsed, into: &output
-                )
-            }
-        default:
-            break
-        }
-    }
-
-    /// Collapses containers below the second level on first show.
-    ///
-    /// The top two levels are the shape of the payload and are what someone
-    /// opening a body is looking for; everything under them is detail they can
-    /// ask for. Without this a large response opens as a wall of rows, which is
-    /// the problem the tree was supposed to solve.
-    static func initiallyCollapsed(_ node: JSONNode, maxExpandedDepth: Int = 2) -> Set<String> {
-        var output: Set<String> = []
-        func walk(_ node: JSONNode, path: String, depth: Int) {
-            guard node.isContainer else { return }
-            if depth >= maxExpandedDepth { output.insert(path) }
-
-            switch node {
-            case .object(let entries):
-                for entry in entries {
-                    walk(entry.value, path: "\(path)/\(entry.key)", depth: depth + 1)
-                }
-            case .array(let elements):
-                for (index, element) in elements.enumerated() {
-                    walk(element, path: "\(path)/\(index)", depth: depth + 1)
-                }
-            default:
-                break
-            }
-        }
-        walk(node, path: "", depth: 0)
-        return output
     }
 }
 
 /// One line of the tree.
 struct JSONTreeRow: View {
 
-    struct Row {
+    struct Row: Sendable {
         let path: String
         /// Key, or array index. `nil` for the root.
         let label: String?
@@ -169,7 +145,7 @@ struct JSONTreeRow: View {
             Text(value)
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(valueTint)
-                .lineLimit(isCollapsed || !row.isContainer ? 1 : nil)
+                .lineLimit(1)
                 .truncationMode(.middle)
 
             Spacer(minLength: 0)
@@ -182,6 +158,10 @@ struct JSONTreeRow: View {
     /// A collapsed container summarises what is inside it, so the shape of the
     /// payload survives collapsing. `{…}` alone would make the tree useless as
     /// an overview, which is its main job.
+    ///
+    /// Scalars are shown on one line, truncated in the middle. A base64 image
+    /// in a JSON field is otherwise a single row several screens tall, and it
+    /// is laid out before anything below it can be drawn.
     private var value: String {
         switch row.node {
         case .object(let entries):
@@ -193,7 +173,7 @@ struct JSONTreeRow: View {
                 ? "[ \(elements.count) \(elements.count == 1 ? "item" : "items") ]"
                 : "["
         case .string(let text):
-            return "\"\(text)\""
+            return "\"\(text.count > Self.maxScalarLength ? String(text.prefix(Self.maxScalarLength)) + "…" : text)\""
         // Rendered from the literal the server sent, not from a `Double`, so
         // long ids and trailing zeros do not change on the way to the screen.
         case .number(let literal):
@@ -204,6 +184,8 @@ struct JSONTreeRow: View {
             return "null"
         }
     }
+
+    private static let maxScalarLength = 512
 
     private var valueTint: Color {
         switch row.node {
