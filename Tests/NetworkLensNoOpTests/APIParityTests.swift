@@ -30,7 +30,8 @@ final class APIParityTests: XCTestCase {
                 maxStoredExchanges: 500,
                 productionHostPatterns: ["api.acme.com"],
                 keepBreakpointsAcrossLaunches: true,
-                persistsRules: true
+                persistsRules: true,
+                redactsPersistedRules: false
             )
         )
 

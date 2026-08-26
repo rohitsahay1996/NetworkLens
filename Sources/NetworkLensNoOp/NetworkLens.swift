@@ -108,6 +108,7 @@ public struct LensConfiguration: Sendable {
     public var productionHostPatterns: [String]
     public var keepBreakpointsAcrossLaunches: Bool
     public var persistsRules: Bool
+    public var redactsPersistedRules: Bool
 
     public init(
         matchers: [RequestMatcher] = [PathMatcher()],
@@ -118,7 +119,8 @@ public struct LensConfiguration: Sendable {
         maxCapturedResponseBodyBytes: Int = 1_048_576,
         productionHostPatterns: [String] = [],
         keepBreakpointsAcrossLaunches: Bool = false,
-        persistsRules: Bool = false
+        persistsRules: Bool = false,
+        redactsPersistedRules: Bool = true
     ) {
         self.matchers = matchers
         self.redactor = redactor
@@ -129,6 +131,7 @@ public struct LensConfiguration: Sendable {
         self.productionHostPatterns = productionHostPatterns
         self.keepBreakpointsAcrossLaunches = keepBreakpointsAcrossLaunches
         self.persistsRules = persistsRules
+        self.redactsPersistedRules = redactsPersistedRules
     }
 
     /// Always false here. Nothing in this target can arm a breakpoint, so
