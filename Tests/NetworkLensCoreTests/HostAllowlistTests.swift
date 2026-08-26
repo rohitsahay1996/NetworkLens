@@ -118,4 +118,62 @@ final class HostAllowlistTests: XCTestCase {
         XCTAssertFalse(LensURLProtocol.canInit(with: request("ws://wwwuatb.gdn-app.com/socket")))
         XCTAssertFalse(LensURLProtocol.canInit(with: request("file:///tmp/x.json")))
     }
+
+    // MARK: - End to end
+
+    /// The default is the one that has to be right, because it is the one every
+    /// existing host gets without asking: with no list, an arbitrary host the
+    /// caller never named still reaches the store.
+    func testWithNoListAnUnnamedHostIsStillRecorded() async throws {
+        let session = interceptingSession(capturing: [])
+        defer { teardown(session) }
+        Mocks.shared.set(MockRule(endpointKey: "GET /anything", response: .json("{}")))
+
+        _ = try await session.data(from: XCTUnwrap(URL(string: "https://vendor.invalid/anything")))
+
+        XCTAssertEqual(NetworkLens.store.exchanges.count, 1)
+        XCTAssertEqual(NetworkLens.store.exchanges.first?.request.url.host, "vendor.invalid")
+    }
+
+    func testWithAListOnlyTheListedHostIsRecorded() async throws {
+        let session = interceptingSession(capturing: ["listed.invalid"])
+        defer { teardown(session) }
+        Mocks.shared.set(MockRule(endpointKey: "GET /anything", response: .json("{}")))
+
+        _ = try await session.data(from: XCTUnwrap(URL(string: "https://listed.invalid/anything")))
+
+        // Never intercepted, so the mock cannot claim it and the unresolvable
+        // host is what answers — which is the point: the lens is not in the way.
+        let excluded = try XCTUnwrap(URL(string: "https://vendor.invalid/anything"))
+        do {
+            _ = try await session.data(from: excluded)
+            XCTFail("an excluded host must reach the real network, not the mocking engine")
+        } catch {
+            // Expected: `.invalid` cannot resolve.
+        }
+
+        XCTAssertEqual(NetworkLens.store.exchanges.count, 1)
+        XCTAssertEqual(NetworkLens.store.exchanges.first?.request.url.host, "listed.invalid")
+    }
+
+    private func interceptingSession(capturing patterns: [String]) -> URLSession {
+        NetworkLens.start(
+            configuration: LensConfiguration(
+                maxStoredExchanges: 50, capturedHostPatterns: patterns
+            )
+        )
+        NetworkLens.store.removeAll()
+        Mocks.shared.removeAll()
+        Breakpoints.shared.removeAll()
+
+        let configuration = URLSessionConfiguration.ephemeral
+        NetworkLens.install(into: configuration)
+        return URLSession(configuration: configuration)
+    }
+
+    private func teardown(_ session: URLSession) {
+        Mocks.shared.removeAll()
+        NetworkLens.store.removeAll()
+        session.invalidateAndCancel()
+    }
 }
