@@ -783,6 +783,12 @@ NetworkLens.start(
         // the whole body, and anything past the cap is dropped on the way into
         // the ring buffer, with the real size kept as `originalBodyByteCount`.
         maxCapturedResponseBodyBytes: 1_048_576,
+        // Empty by default, which captures everything. Naming hosts here drops
+        // everything else at `canInit` — no interception, no ring-buffer slot,
+        // no trace line — which is what keeps a chatty analytics SDK from
+        // evicting the API calls you opened the lens to read. The cost is that
+        // mocks, breakpoints and replay cannot reach an excluded host either.
+        capturedHostPatterns: ["api.myapp.com"],     // "" or omitted = capture everything
         productionHostPatterns: ["api.myapp.com"],   // guards request editing
         // Both persistence flags default to *false* — out of the box nothing
         // is written and nothing comes back. The pair shown here is the

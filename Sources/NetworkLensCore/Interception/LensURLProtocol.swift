@@ -45,7 +45,11 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
         // Already ours — this is the passthrough leg. Must be first.
         guard URLProtocol.property(forKey: handledKey, in: request) == nil else { return false }
         guard let scheme = request.url?.scheme?.lowercased() else { return false }
-        return scheme == "http" || scheme == "https"
+        guard scheme == "http" || scheme == "https" else { return false }
+        // Last, because it is the only check here that reads the configuration
+        // behind a lock. A host outside the allowlist is dropped at this line
+        // and never reaches the store, the trace or the mocking engine.
+        return NetworkLens.configuration.capturesHost(request.url?.host)
     }
 
     public override class func canonicalRequest(for request: URLRequest) -> URLRequest {

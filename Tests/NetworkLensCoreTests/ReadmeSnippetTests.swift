@@ -25,6 +25,7 @@ final class ReadmeSnippetTests: XCTestCase {
                 automaticScreenAttribution: true,
                 maxCapturedRequestBodyBytes: 1_048_576,
                 maxCapturedResponseBodyBytes: 1_048_576,
+                capturedHostPatterns: ["api.myapp.com"],
                 productionHostPatterns: ["api.myapp.com"],
                 keepBreakpointsAcrossLaunches: false,
                 persistsRules: true,
@@ -33,6 +34,8 @@ final class ReadmeSnippetTests: XCTestCase {
         )
 
         XCTAssertTrue(NetworkLens.configuration.isProductionHost("api.myapp.com"))
+        XCTAssertTrue(NetworkLens.configuration.capturesHost("api.myapp.com"))
+        XCTAssertFalse(NetworkLens.configuration.capturesHost("cdn.othervendor.com"))
         NetworkLens.start(configuration: LensConfiguration(maxStoredExchanges: 50))
     }
 

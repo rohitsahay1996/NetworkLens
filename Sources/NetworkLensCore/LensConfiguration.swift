@@ -31,6 +31,24 @@ public struct LensConfiguration: Sendable {
     /// Cap on bytes retained from a response body.
     public var maxCapturedResponseBodyBytes: Int
 
+    /// Hosts the lens captures, or empty to capture everything.
+    ///
+    /// An app talks to far more hosts than the ones its team owns — analytics,
+    /// crash reporting, attribution, fonts, image CDNs — and every one of them
+    /// competes for the `maxStoredExchanges` ring buffer. A session that
+    /// re-fetches the same banner twenty times evicts the API calls someone
+    /// opened the lens to look at.
+    ///
+    /// Filtering here rather than in the reader is deliberate: a host that is
+    /// not captured is never intercepted, so it costs no `URLProtocol` round
+    /// trip, takes no buffer slot and writes no trace line. The price is that
+    /// mocks, breakpoints and replay do not reach it either — it is invisible
+    /// to the whole tool, not merely hidden from the list.
+    ///
+    /// Matched like `productionHostPatterns`: equal to the host, or the host
+    /// ends with `"." + pattern`, with a leading `*.` accepted and stripped.
+    public var capturedHostPatterns: [String]
+
     /// Hosts treated as production. Request breakpoints refuse to arm against
     /// these, because an edited request creates real records on a real backend.
     /// Response breakpoints are unaffected — they never leave the device.
@@ -86,12 +104,14 @@ public struct LensConfiguration: Sendable {
         automaticScreenAttribution: Bool = true,
         maxCapturedRequestBodyBytes: Int = 1_048_576,
         maxCapturedResponseBodyBytes: Int = 1_048_576,
+        capturedHostPatterns: [String] = [],
         productionHostPatterns: [String] = [],
         keepBreakpointsAcrossLaunches: Bool = false,
         persistsRules: Bool = false,
         redactsPersistedRules: Bool = true,
         trace: TraceOptions? = nil
     ) {
+        self.capturedHostPatterns = capturedHostPatterns
         self.productionHostPatterns = productionHostPatterns
         self.keepBreakpointsAcrossLaunches = keepBreakpointsAcrossLaunches
         self.persistsRules = persistsRules
@@ -110,8 +130,30 @@ public struct LensConfiguration: Sendable {
     /// A `nil` host is treated as non-production: it means a malformed URL,
     /// and blocking on it would be confusing without protecting anything.
     public func isProductionHost(_ host: String?) -> Bool {
+        Self.host(host, matchesAnyOf: productionHostPatterns)
+    }
+
+    /// True when the lens should capture traffic to this host.
+    ///
+    /// An empty `capturedHostPatterns` captures everything, so an app that
+    /// never sets one keeps exactly the behaviour it had before the list
+    /// existed.
+    ///
+    /// A `nil` host is captured only while the list is empty. Once a caller
+    /// has named the hosts they want, a malformed URL cannot be shown to be
+    /// one of them, and an allowlist that admits unknowns is not an allowlist
+    /// — the opposite of `isProductionHost`, where letting an unknown through
+    /// costs nothing.
+    public func capturesHost(_ host: String?) -> Bool {
+        guard !capturedHostPatterns.isEmpty else { return true }
+        return Self.host(host, matchesAnyOf: capturedHostPatterns)
+    }
+
+    /// Shared by both host lists so the two cannot drift apart on what a
+    /// pattern means.
+    private static func host(_ host: String?, matchesAnyOf patterns: [String]) -> Bool {
         guard let host = host?.lowercased(), !host.isEmpty else { return false }
-        for raw in productionHostPatterns {
+        for raw in patterns {
             var pattern = raw.lowercased()
             if pattern.hasPrefix("*.") { pattern.removeFirst(2) }
             guard !pattern.isEmpty else { continue }

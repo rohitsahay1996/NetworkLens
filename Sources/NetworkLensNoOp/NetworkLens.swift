@@ -126,6 +126,7 @@ public struct LensConfiguration: Sendable {
     public var automaticScreenAttribution: Bool
     public var maxCapturedRequestBodyBytes: Int
     public var maxCapturedResponseBodyBytes: Int
+    public var capturedHostPatterns: [String]
     public var productionHostPatterns: [String]
     public var keepBreakpointsAcrossLaunches: Bool
     public var persistsRules: Bool
@@ -139,6 +140,7 @@ public struct LensConfiguration: Sendable {
         automaticScreenAttribution: Bool = true,
         maxCapturedRequestBodyBytes: Int = 1_048_576,
         maxCapturedResponseBodyBytes: Int = 1_048_576,
+        capturedHostPatterns: [String] = [],
         productionHostPatterns: [String] = [],
         keepBreakpointsAcrossLaunches: Bool = false,
         persistsRules: Bool = false,
@@ -151,6 +153,7 @@ public struct LensConfiguration: Sendable {
         self.automaticScreenAttribution = automaticScreenAttribution
         self.maxCapturedRequestBodyBytes = maxCapturedRequestBodyBytes
         self.maxCapturedResponseBodyBytes = maxCapturedResponseBodyBytes
+        self.capturedHostPatterns = capturedHostPatterns
         self.productionHostPatterns = productionHostPatterns
         self.keepBreakpointsAcrossLaunches = keepBreakpointsAcrossLaunches
         self.persistsRules = persistsRules
@@ -161,6 +164,11 @@ public struct LensConfiguration: Sendable {
     /// Always false here. Nothing in this target can arm a breakpoint, so
     /// there is nothing for the production guard to refuse.
     public func isProductionHost(_ host: String?) -> Bool { false }
+
+    /// Always false, including for the empty list the real one treats as
+    /// "capture everything": a release build captures nothing, and saying so
+    /// is more useful than mirroring a decision this target never acts on.
+    public func capturesHost(_ host: String?) -> Bool { false }
 
     public static var `default`: LensConfiguration { LensConfiguration() }
 

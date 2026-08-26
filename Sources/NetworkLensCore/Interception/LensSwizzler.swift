@@ -116,6 +116,10 @@ extension URLSession {
     /// caller.
     private func lens_stamp(_ request: URLRequest) -> URLRequest {
         guard NetworkLens.isActive else { return request }
+        // A host the allowlist excludes is never captured, so stamping it would
+        // only mutate a third party's request to carry attribution nothing will
+        // ever read.
+        guard NetworkLens.configuration.capturesHost(request.url?.host) else { return request }
         return request.stamped(screen: ScreenContext.shared.current, exchangeID: UUID())
     }
 

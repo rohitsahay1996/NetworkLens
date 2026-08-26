@@ -28,6 +28,7 @@ final class APIParityTests: XCTestCase {
                 matchers: [GraphQLMatcher(), PathMatcher()],
                 redactor: DefaultRedactor(),
                 maxStoredExchanges: 500,
+                capturedHostPatterns: ["api.acme.com"],
                 productionHostPatterns: ["api.acme.com"],
                 keepBreakpointsAcrossLaunches: true,
                 persistsRules: true,
@@ -37,6 +38,7 @@ final class APIParityTests: XCTestCase {
 
         XCTAssertFalse(NetworkLens.isActive)
         XCTAssertFalse(NetworkLens.configuration.isProductionHost("api.acme.com"))
+        XCTAssertFalse(NetworkLens.configuration.capturesHost("api.acme.com"))
         XCTAssertTrue(NetworkLens.store.exchanges.isEmpty)
         XCTAssertEqual(NetworkLens.endpointKey(for: URLRequest(url: URL(string: "https://x.test")!)), "")
     }
