@@ -38,6 +38,21 @@ public enum NetworkLens {
             Mocks.shared.clearForRelaunch()
         }
 
+        if let options = configuration.trace {
+            // Attached before the launch scenario is applied, so a mock that a
+            // scenario arms at startup still shows up in the trace as mocked
+            // rather than appearing from nowhere on the first request.
+            let writer = TraceWriter(options: options, redactor: configuration.redactor)
+            writer.attach(to: store)
+            state.noteTraceWriter(writer)
+        } else {
+            // start() is documented as replacing the configuration, so a second
+            // call without a trace option has to stop the first one's writer.
+            // Leaving it attached would keep writing under a configuration that
+            // says tracing is off.
+            state.clearTraceWriter()
+        }
+
         // After the restore, never before: a launch argument names a scenario
         // by the name it was saved under, and nothing has been read off disk
         // until the line above runs.
@@ -59,6 +74,19 @@ public enum NetworkLens {
             LensSwizzler.installTaskHooks()
         }
     }
+
+    /// Where the trace is being written, or nil when tracing is off.
+    ///
+    /// The path a tester reads out to whoever is going to pull the file off the
+    /// device — on a simulator it is under the app's data container, which is
+    /// not somewhere anyone guesses.
+    public static var traceURL: URL? { state.traceWriter?.fileURL }
+
+    /// Blocks until queued trace lines have landed.
+    ///
+    /// Writing is asynchronous, so a test or a CI step that reads the file
+    /// straight after firing a request needs this or it reads a short file.
+    public static func flushTrace() { state.traceWriter?.flush() }
 
     /// Applies a saved scenario by name, for a caller that has no UI.
     ///
@@ -232,6 +260,11 @@ final class LensState: @unchecked Sendable {
     private var _blockedRewrites: [String] = []
     private var _launchScenarioActivation: ScenarioActivation?
 
+    /// Held for the process lifetime: the writer's only strong reference is
+    /// its subscription token, and dropping it here would silently stop the
+    /// trace one request in.
+    private var _traceWriter: TraceWriter?
+
     let store = ExchangeStore()
 
     var uninterceptable: [String] {
@@ -250,6 +283,27 @@ final class LensState: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return _launchScenarioActivation
+    }
+
+    var traceWriter: TraceWriter? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _traceWriter
+    }
+
+    func clearTraceWriter() {
+        lock.lock()
+        let previous = _traceWriter
+        _traceWriter = nil
+        lock.unlock()
+        previous?.detach()
+    }
+
+    func noteTraceWriter(_ writer: TraceWriter) {
+        lock.lock()
+        _traceWriter?.detach()
+        _traceWriter = writer
+        lock.unlock()
     }
 
     func noteLaunchScenario(_ activation: ScenarioActivation) {

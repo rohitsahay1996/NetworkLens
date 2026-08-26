@@ -48,6 +48,11 @@ public enum NetworkLens {
 
     public static var launchScenarioActivation: ScenarioActivation? { nil }
 
+    /// Always nil: nothing here writes a trace, so there is no path to report.
+    public static var traceURL: URL? { nil }
+
+    public static func flushTrace() {}
+
     /// Hands the request straight back. Nothing reads the tag in a release
     /// build, and a stamped `URLProtocol` property on a request nobody
     /// intercepts is dead weight on every call site that attributes traffic.
@@ -96,6 +101,22 @@ public enum NetworkLens {
     #endif
 }
 
+// MARK: - Trace
+
+public struct TraceOptions: Sendable {
+    public var url: URL?
+    public var maxBytes: Int
+    public var includesBodies: Bool
+
+    public init(url: URL? = nil, maxBytes: Int = 32 * 1_048_576, includesBodies: Bool = true) {
+        self.url = url
+        self.maxBytes = maxBytes
+        self.includesBodies = includesBodies
+    }
+
+    public static func defaultURL() -> URL { URL(fileURLWithPath: "/dev/null") }
+}
+
 // MARK: - Configuration
 
 public struct LensConfiguration: Sendable {
@@ -109,6 +130,7 @@ public struct LensConfiguration: Sendable {
     public var keepBreakpointsAcrossLaunches: Bool
     public var persistsRules: Bool
     public var redactsPersistedRules: Bool
+    public var trace: TraceOptions?
 
     public init(
         matchers: [RequestMatcher] = [PathMatcher()],
@@ -120,7 +142,8 @@ public struct LensConfiguration: Sendable {
         productionHostPatterns: [String] = [],
         keepBreakpointsAcrossLaunches: Bool = false,
         persistsRules: Bool = false,
-        redactsPersistedRules: Bool = true
+        redactsPersistedRules: Bool = true,
+        trace: TraceOptions? = nil
     ) {
         self.matchers = matchers
         self.redactor = redactor
@@ -132,6 +155,7 @@ public struct LensConfiguration: Sendable {
         self.keepBreakpointsAcrossLaunches = keepBreakpointsAcrossLaunches
         self.persistsRules = persistsRules
         self.redactsPersistedRules = redactsPersistedRules
+        self.trace = trace
     }
 
     /// Always false here. Nothing in this target can arm a breakpoint, so

@@ -70,6 +70,15 @@ public struct LensConfiguration: Sendable {
     /// lands on disk.
     public var redactsPersistedRules: Bool
 
+    /// Write finished exchanges to a newline-delimited JSON file, or nil for
+    /// the default of writing nothing.
+    ///
+    /// Off by default for the same reason `persistsRules` is: a debugging tool
+    /// should not start writing a host app's traffic to disk uninvited. The
+    /// trace is redacted on the way out, like every other thing this package
+    /// persists.
+    public var trace: TraceOptions?
+
     public init(
         matchers: [RequestMatcher] = [PathMatcher()],
         redactor: Redactor = DefaultRedactor(),
@@ -80,12 +89,14 @@ public struct LensConfiguration: Sendable {
         productionHostPatterns: [String] = [],
         keepBreakpointsAcrossLaunches: Bool = false,
         persistsRules: Bool = false,
-        redactsPersistedRules: Bool = true
+        redactsPersistedRules: Bool = true,
+        trace: TraceOptions? = nil
     ) {
         self.productionHostPatterns = productionHostPatterns
         self.keepBreakpointsAcrossLaunches = keepBreakpointsAcrossLaunches
         self.persistsRules = persistsRules
         self.redactsPersistedRules = redactsPersistedRules
+        self.trace = trace
         self.matchers = matchers
         self.redactor = redactor
         self.maxStoredExchanges = maxStoredExchanges

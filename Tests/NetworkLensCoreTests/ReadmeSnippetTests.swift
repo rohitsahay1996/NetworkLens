@@ -36,6 +36,28 @@ final class ReadmeSnippetTests: XCTestCase {
         NetworkLens.start(configuration: LensConfiguration(maxStoredExchanges: 50))
     }
 
+    /// The trace snippet from "Reading the trace from an agent". The MCP server
+    /// reads what this writes, so a rename here breaks a tool in another
+    /// language that no Swift compile would otherwise catch.
+    func testTraceSnippetCompiles() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("readme-trace-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        NetworkLens.start(
+            configuration: LensConfiguration(
+                trace: TraceOptions(url: directory.appendingPathComponent("trace.ndjson"))
+            )
+        )
+
+        XCTAssertNotNil(NetworkLens.traceURL)
+        NetworkLens.flushTrace()
+
+        // Back to a configuration that writes nothing, so this test does not
+        // leave a writer attached to the shared store for whatever runs next.
+        NetworkLens.start(configuration: LensConfiguration())
+    }
+
     /// The README once told readers to write `URLSessionConfiguration()`, which
     /// has no usable initialiser and traps at runtime. Compiling — and running —
     /// the samples is what caught it.

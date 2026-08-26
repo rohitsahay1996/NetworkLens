@@ -699,6 +699,29 @@ answer.
 
 ---
 
+## Reading the trace from an agent
+
+`TraceOptions` writes every finished exchange to a newline-delimited JSON file,
+redacted, which is what makes the session readable by something other than the
+overlay:
+
+```swift
+NetworkLens.start(configuration: LensConfiguration(trace: TraceOptions()))
+// NetworkLens.traceURL reports where it landed.
+// NetworkLens.flushTrace() blocks until queued lines have been written.
+```
+
+Off by default, for the same reason `persistsRules` is — a debugging tool should
+not start writing a host app's traffic to disk uninvited.
+
+An exchange is written when it finishes and again on every later edit, so the
+last line for an id is its current state and the earlier ones are the audit
+trail. `TraceOptions(includesBodies: false)` keeps headers, status and timing
+without the payloads; the file rotates at `maxBytes` keeping one generation.
+
+`Tools/networklens-mcp` serves that file to Claude Code as MCP tools — list
+traffic, slice a body by JSON Pointer, diff two calls. See its README.
+
 ## API cheat sheet
 
 ```swift
@@ -736,6 +759,11 @@ LensLaunchOptions.scenarioEnvironmentKey  // "NETWORKLENS_SCENARIO"
 // Export and replay
 CurlExport.command(for: exchange, secrets: .redacted)
 NetworkLens.replay(_ exchange: NetworkExchange) async throws
+
+// Trace
+NetworkLens.traceURL: URL?
+NetworkLens.flushTrace()
+TraceOptions(url:maxBytes:includesBodies:)
 ```
 
 ### Configuration

@@ -18,6 +18,7 @@ public final class ExchangeStore: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [NetworkExchange] = []
     private var observers: [UUID: @Sendable () -> Void] = [:]
+    private var exchangeObservers: [UUID: @Sendable (NetworkExchange) -> Void] = [:]
 
     /// Maximum retained exchanges. Setting a lower value evicts immediately.
     public private(set) var capacity: Int
@@ -58,7 +59,7 @@ public final class ExchangeStore: @unchecked Sendable {
             storage.removeFirst(storage.count - capacity)
         }
         lock.unlock()
-        notify()
+        notify(exchange)
     }
 
     /// Appends, or replaces in place if an exchange with this id is already
@@ -79,7 +80,7 @@ public final class ExchangeStore: @unchecked Sendable {
             }
         }
         lock.unlock()
-        notify()
+        notify(exchange)
     }
 
     /// Replaces an exchange in place, keeping its position in the buffer.
@@ -94,9 +95,10 @@ public final class ExchangeStore: @unchecked Sendable {
             lock.unlock()
             return false
         }
-        storage[index] = transform(storage[index])
+        let updated = transform(storage[index])
+        storage[index] = updated
         lock.unlock()
-        notify()
+        notify(updated)
         return true
     }
 
@@ -135,17 +137,50 @@ public final class ExchangeStore: @unchecked Sendable {
         }
     }
 
+    /// Change notifications that carry the exchange just written.
+    ///
+    /// The payload-free variant above forces a subscriber to re-read the whole
+    /// buffer to find what moved, which is O(n) per request and races with
+    /// eviction — the exchange it is looking for may already be gone. A trace
+    /// sink needs the bytes that were written, not a hint that something was.
+    ///
+    /// Fires for every write, so an exchange recorded in flight and completed
+    /// later arrives twice. Subscribers that want finished traffic only filter
+    /// on `isInFlight`.
+    public func addExchangeObserver(
+        _ observer: @escaping @Sendable (NetworkExchange) -> Void
+    ) -> ObservationToken {
+        let id = UUID()
+        lock.lock()
+        exchangeObservers[id] = observer
+        lock.unlock()
+        return ObservationToken(id: id) { [weak self] id in
+            self?.removeExchangeObserver(id)
+        }
+    }
+
+    private func removeExchangeObserver(_ id: UUID) {
+        lock.lock()
+        exchangeObservers[id] = nil
+        lock.unlock()
+    }
+
     private func removeObserver(_ id: UUID) {
         lock.lock()
         observers[id] = nil
         lock.unlock()
     }
 
-    private func notify() {
+    /// `written` is the exchange this call wrote, or nil for a bulk change
+    /// that names no single one (`removeAll`, `setCapacity`).
+    private func notify(_ written: NetworkExchange? = nil) {
         lock.lock()
-        let current = Array(observers.values)
+        let plain = Array(observers.values)
+        let detailed = written == nil ? [] : Array(exchangeObservers.values)
         lock.unlock()
-        for observer in current { observer() }
+        for observer in plain { observer() }
+        guard let written else { return }
+        for observer in detailed { observer(written) }
     }
 
     /// Deregisters its observer when released.
