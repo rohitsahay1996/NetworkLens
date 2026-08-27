@@ -29,7 +29,8 @@ Requires iOS 15+. No dependencies.
 11. [What it cannot see](#what-it-cannot-see)
 12. [Using it](#using-it)
 13. [Driving it from a UI test](#driving-it-from-a-ui-test)
-14. [API cheat sheet](#api-cheat-sheet)
+14. [Reading the trace from an agent](#reading-the-trace-from-an-agent) — the MCP server
+15. [API cheat sheet](#api-cheat-sheet)
 
 ---
 
@@ -565,6 +566,7 @@ If step 2 never happens, see the next section.
 | No traffic at all | `start()` never ran, or ran after the session was built | Move `start()` earlier; see [the ordering rule](#the-one-ordering-rule) |
 | Some traffic missing | That session uses a configuration the lens never saw | `NetworkLens.install(into:)` on it |
 | One SDK's traffic missing | It builds its own configuration, or does not use `URLSession` | Configuration hook, or `record(_:)` |
+| A host's traffic missing, everything else fine | `capturedHostPatterns` is non-empty and that host is not in it | Add it, or clear the list to capture everything — an excluded host is dropped at `canInit`, so mocks, breakpoints and replay cannot reach it either |
 | Nothing captured, no error | A background configuration | Check `NetworkLens.uninterceptable`; background transfers are impossible to intercept |
 | `WKWebView` requests missing | Out of `URLProtocol`'s reach | Not supported — see below |
 | Mocks not served | Master switch off, or rule disabled | Mocks tab → *Mocking enabled*; the bubble turns purple when mocks are serving |
@@ -593,6 +595,10 @@ Stated plainly, because discovering these by surprise wastes an afternoon:
   with their own transport.
 - **Streaming.** SSE and chunked responses are buffered, so they arrive all at
   once rather than incrementally.
+- **Any host you excluded.** `capturedHostPatterns` is empty by default, which
+  captures everything. Naming hosts turns it into an allowlist and everything
+  else is dropped at `canInit` — no capture, no trace line, and no mock,
+  breakpoint or replay on that host either.
 
 For the first three, `NetworkLens.record(_:)` puts an exchange on the timeline by
 hand, which is worth doing at the boundary of anything important.
@@ -719,8 +725,52 @@ last line for an id is its current state and the earlier ones are the audit
 trail. `TraceOptions(includesBodies: false)` keeps headers, status and timing
 without the payloads; the file rotates at `maxBytes` keeping one generation.
 
-`Tools/networklens-mcp` serves that file to Claude Code as MCP tools — list
-traffic, slice a body by JSON Pointer, diff two calls. See its README.
+### The MCP server
+
+`Tools/networklens-mcp` serves that file to an MCP client such as Claude Code,
+so an agent reads the app's real requests instead of being told about them.
+Read-only — nothing there can arm a mock or edit a response, which would need a
+control channel into the running app.
+
+```bash
+cd Tools/networklens-mcp
+npm install && npm run build
+```
+
+Point it at a trace. Precedence is `NETWORKLENS_TRACE` →
+`NETWORKLENS_BUNDLE_ID` (booted simulator) → the host's own Application Support:
+
+```jsonc
+// .mcp.json, in the app repo
+{
+  "mcpServers": {
+    "networklens": {
+      "command": "node",
+      "args": ["/absolute/path/to/NetworkLens/Tools/networklens-mcp/dist/index.js"],
+      "env": { "NETWORKLENS_BUNDLE_ID": "com.example.myapp" }
+    }
+  }
+}
+```
+
+| Tool | Returns |
+|---|---|
+| `lens_status` | Trace path, exchange count, sessions. Start here when nothing else returns rows |
+| `lens_list` | One line per exchange — id, status, ms, size, screen, endpoint, flags. Never bodies |
+| `lens_get` | Headers, timing and metadata for one exchange |
+| `lens_body` | A JSON-Pointer slice of one body, or a depth-collapsed outline |
+| `lens_search` | Key/value match across bodies → pointers to read, not payloads |
+| `lens_stats` | Counts by status and endpoint, slowest calls, mocked vs live |
+| `lens_curl` | One request rebuilt as curl |
+| `lens_diff` | Two exchanges — status, timing, and which body pointers differ |
+
+Every tool is summary-first on purpose: a megabyte response pasted whole into a
+model's context makes its answers worse, not better, so bodies are reached
+through `lens_body` by pointer or depth cap and clipped at 8k characters even
+then. A physical device has no path the Mac can read — pull the container with
+Xcode (Devices → app → Download Container) and set `NETWORKLENS_TRACE` to the
+`trace.ndjson` inside it. Full detail in
+[`Tools/networklens-mcp/README.md`](Tools/networklens-mcp/README.md).
 
 ## API cheat sheet
 
