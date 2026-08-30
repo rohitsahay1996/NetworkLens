@@ -23,8 +23,14 @@ extension NetworkLens {
     /// that breaks on iPad multi-window and in any scene-based app.
     ///
     /// Safe to call more than once per scene; the second call is a no-op.
+    ///
+    /// Refuses while the runtime gate is shut, so a host app can leave the
+    /// call site unguarded and let the flag decide. An overlay that appeared in
+    /// a build where nothing was being captured would be worse than no overlay
+    /// — a floating bubble over a shipped app, reporting zero.
     @MainActor
     public static func attachOverlay(to scene: UIWindowScene) {
+        guard isEnabled else { return }
         OverlayWindowController.shared.attach(to: scene)
     }
 
@@ -47,7 +53,7 @@ extension NetworkLens {
             .first { $0.activationState == .foregroundActive }
             ?? UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
 
-        guard let scene else { return false }
+        guard isEnabled, let scene else { return false }
         OverlayWindowController.shared.attach(to: scene)
         return true
     }

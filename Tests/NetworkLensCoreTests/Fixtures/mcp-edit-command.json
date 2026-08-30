@@ -1,0 +1,112 @@
+{
+  "id": 1,
+  "kind": "edit",
+  "rules": [
+    {
+      "id": "9D74C2D8-E4DB-49FA-B0ED-01E181D73E96",
+      "endpointKey": "GET /flashsale/v2/products",
+      "match": {
+        "query": {},
+        "headers": {},
+        "bodyContains": null
+      },
+      "variants": [
+        {
+          "id": "4A0B1B59-9741-47E4-8872-3945959D4B02",
+          "name": "loaded",
+          "steps": [
+            {
+              "respond": {
+                "_0": {
+                  "body": "eyJkYXRhIjp7InByb2R1Y3RzIjpbeyJpZCI6MX1dfX0=",
+                  "delay": 0,
+                  "headers": {
+                    "Content-Type": "application/json"
+                  },
+                  "statusCode": 200
+                }
+              }
+            }
+          ],
+          "exhaustion": "repeatLast"
+        },
+        {
+          "id": "5EA91D70-4FE8-47FB-865A-0FCAEF6A37E4",
+          "name": "empty",
+          "steps": [
+            {
+              "respond": {
+                "_0": {
+                  "body": "eyJkYXRhIjp7InByb2R1Y3RzIjpbXX19",
+                  "delay": 0,
+                  "headers": {
+                    "Content-Type": "application/json"
+                  },
+                  "statusCode": 200
+                }
+              }
+            }
+          ],
+          "exhaustion": "repeatLast"
+        },
+        {
+          "id": "E91D4152-FF0C-4FD3-B387-B9CFBAE22363",
+          "name": "500",
+          "steps": [
+            {
+              "respond": {
+                "_0": {
+                  "body": "eyJkYXRhIjpudWxsfQ==",
+                  "delay": 0,
+                  "headers": {
+                    "Content-Type": "application/json"
+                  },
+                  "statusCode": 500
+                }
+              }
+            }
+          ],
+          "exhaustion": "repeatLast"
+        },
+        {
+          "id": "1BC7724E-A580-4DF9-BDBE-617D691E2A08",
+          "name": "slow",
+          "steps": [
+            {
+              "respond": {
+                "_0": {
+                  "body": "eyJkYXRhIjp7InByb2R1Y3RzIjpbeyJpZCI6MX1dfX0=",
+                  "delay": 3,
+                  "headers": {
+                    "Content-Type": "application/json"
+                  },
+                  "statusCode": 200
+                }
+              }
+            }
+          ],
+          "exhaustion": "repeatLast"
+        },
+        {
+          "id": "BC24EAF5-0447-405C-A1AB-B89CA06860DD",
+          "name": "timeout",
+          "steps": [
+            {
+              "fail": {
+                "_0": {
+                  "errorCode": -1001,
+                  "label": "timed out",
+                  "delay": 0
+                }
+              }
+            }
+          ],
+          "exhaustion": "repeatLast"
+        }
+      ],
+      "activeVariantID": "4A0B1B59-9741-47E4-8872-3945959D4B02",
+      "isEnabled": true
+    }
+  ],
+  "isMockingEnabled": true
+}

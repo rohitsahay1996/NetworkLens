@@ -17,26 +17,22 @@
 // Resolution order, most explicit first:
 //
 //   NETWORKLENS_DISABLED  — force the inert mirror, whatever the configuration
-//   NETWORKLENS_ENABLED   — force the real tool, e.g. for a Release TestFlight
-//                           build a QA team is using
-//   DEBUG                 — the default: real in Debug, inert in Release
+//   otherwise             — the real tool, in every build configuration
 //
-// Both flags exist because "Release" and "shipping to the App Store" are not
-// the same thing. A team that hands TestFlight builds to QA needs the lens in a
-// Release configuration, and a team with a debug-only build that must never
-// carry it needs the opposite.
+// The lens no longer keys off `DEBUG`. Release and "shipping to the App Store"
+// are not the same thing: a team handing TestFlight builds to QA needs the lens
+// in a Release configuration, and configuration-sniffing kept that team fighting
+// the framework. Real by default, opt out per target with NETWORKLENS_DISABLED.
 //
-// One caveat, stated plainly: this links both modules and compiles one away.
-// The dead one is stripped by the linker in practice, but if your release build
-// must provably not contain the tool, link `NetworkLensNoOp` directly instead of
-// this umbrella and skip the flag entirely. See the README.
+// Two consequences, stated plainly. Every configuration that omits the flag —
+// including an App Store archive — links and runs the real interceptor, so an
+// app that must not ship it defines NETWORKLENS_DISABLED in that configuration.
+// And this links both modules and compiles one away; the dead one is stripped by
+// the linker in practice, but if your release binary must provably not contain
+// the tool, link `NetworkLensNoOp` directly instead of this umbrella. See the README.
 
 #if NETWORKLENS_DISABLED
 @_exported import NetworkLensNoOp
-#elseif NETWORKLENS_ENABLED
-@_exported import NetworkLensUI
-#elseif DEBUG
-@_exported import NetworkLensUI
 #else
-@_exported import NetworkLensNoOp
+@_exported import NetworkLensUI
 #endif

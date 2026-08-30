@@ -1,0 +1,8 @@
+{
+  "ENG0002-0001": {
+    "event": "view_item_list",
+    "origin_screen": "retail-home",
+    "required": ["cp1", "items[].item_id", "items[].item_name"],
+    "expect": {"cp1": "Penawaran spesial"}
+  }
+}

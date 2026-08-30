@@ -41,7 +41,13 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
     // MARK: - URLProtocol
 
     public override class func canInit(with request: URLRequest) -> Bool {
-        guard NetworkLens.isActive else { return false }
+        // `isEnabled` as well as `isActive`, and not only for tidiness:
+        // `URLProtocol.registerClass` is process-wide and cannot be relied on
+        // to have been skipped — an earlier enabled `start()` in the same
+        // process leaves this class registered. The gate has to be re-checked
+        // on the request path or "disabled" means "disabled until something
+        // enabled it once".
+        guard NetworkLens.isActive, NetworkLens.isEnabled else { return false }
         // Already ours — this is the passthrough leg. Must be first.
         guard URLProtocol.property(forKey: handledKey, in: request) == nil else { return false }
         guard let scheme = request.url?.scheme?.lowercased() else { return false }
@@ -49,7 +55,7 @@ public final class LensURLProtocol: URLProtocol, @unchecked Sendable {
         // Last, because it is the only check here that reads the configuration
         // behind a lock. A host outside the allowlist is dropped at this line
         // and never reaches the store, the trace or the mocking engine.
-        return NetworkLens.configuration.capturesHost(request.url?.host)
+        return NetworkLens.capturesHost(request.url?.host)
     }
 
     public override class func canonicalRequest(for request: URLRequest) -> URLRequest {

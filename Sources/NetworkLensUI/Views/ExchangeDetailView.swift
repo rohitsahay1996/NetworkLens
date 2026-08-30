@@ -178,7 +178,16 @@ struct ExchangeDetailView: View {
             }
 
             CollapsibleSection(id: "Exchange", title: "Exchange", expanded: $expanded) {
-                LabelledRow(label: "Endpoint", value: exchange.endpointKey, monospaced: true)
+                // Copies the path alone. The method is its own row directly
+                // below, and a pasted endpoint that carries "GET " in front of
+                // it has to be hand-trimmed everywhere it lands.
+                LabelledRow(
+                    label: "Endpoint",
+                    value: exchange.endpointKey,
+                    monospaced: true,
+                    isCopyable: true,
+                    copyValue: exchange.endpointPath
+                )
                 LabelledRow(label: "Method", value: exchange.request.method)
                 LabelledRow(label: "Screen", value: exchange.screen ?? "—")
                 LabelledRow(label: "Source", value: exchange.source.label)
@@ -196,7 +205,8 @@ struct ExchangeDetailView: View {
                 LabelledRow(
                     label: "URL",
                     value: exchange.request.url.absoluteString,
-                    monospaced: true
+                    monospaced: true,
+                    isCopyable: true
                 )
                 if let failure = exchange.failure {
                     LabelledRow(

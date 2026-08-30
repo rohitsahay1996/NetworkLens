@@ -1,0 +1,16 @@
+{
+  "rules": [
+    {
+      "url": "https://bwa-qa2-gcp.gdn-app.com/backend/content-api/sub-flashsale/range?page=1",
+      "method": "GET",
+      "activeVariant": "Empty",
+      "variants": [
+        {"name": "Success", "status": 200, "body": {"code": 200, "status": "OK", "data": [{"id": "x"}]}},
+        {"name": "Empty", "status": 200, "body": {"code": 200, "status": "OK", "data": []}},
+        {"name": "Error 500", "status": 500, "body": {"code": 500, "status": "INTERNAL_SERVER_ERROR"}},
+        {"name": "Timeout", "failure": "timedOut", "delay": 2},
+        {"name": "Hang", "hang": true}
+      ]
+    }
+  ]
+}

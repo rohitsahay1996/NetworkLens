@@ -88,6 +88,25 @@ public struct LensConfiguration: Sendable {
     /// lands on disk.
     public var redactsPersistedRules: Bool
 
+    /// The runtime gate. `false` makes `start()` install nothing at all.
+    ///
+    /// Exists so the tool can ship in an App Store binary and stay dormant
+    /// there. The compile-time switch (`NETWORKLENS_DISABLED`) decides whether
+    /// the code is present; this decides whether it runs, which is the only
+    /// question a feature flag can answer — a flag cannot un-link a module.
+    ///
+    /// Resolve it from whatever the host app trusts and can revoke: a
+    /// server-side flag scoped to staff accounts, not a build setting. Read the
+    /// value at launch, because interception only reaches sessions created
+    /// after `start()` — a flag resolved three seconds in has already missed
+    /// the calls worth seeing. Cache the last known value and act on the cached
+    /// one, refreshing it for next launch.
+    ///
+    /// Off means off: no `URLProtocol` registration, no swizzling, no trace
+    /// writer, no restored rules, no overlay. Not a filter that drops
+    /// exchanges after capturing them.
+    public var isEnabled: Bool
+
     /// Write finished exchanges to a newline-delimited JSON file, or nil for
     /// the default of writing nothing.
     ///
@@ -96,6 +115,9 @@ public struct LensConfiguration: Sendable {
     /// trace is redacted on the way out, like every other thing this package
     /// persists.
     public var trace: TraceOptions?
+
+    /// Collect commands from a local sidecar so an agent can change what is armed without a relaunch.
+    public var control: ControlOptions?
 
     public init(
         matchers: [RequestMatcher] = [PathMatcher()],
@@ -109,8 +131,12 @@ public struct LensConfiguration: Sendable {
         keepBreakpointsAcrossLaunches: Bool = false,
         persistsRules: Bool = false,
         redactsPersistedRules: Bool = true,
-        trace: TraceOptions? = nil
+        isEnabled: Bool = true,
+        trace: TraceOptions? = nil,
+        control: ControlOptions? = nil
     ) {
+        self.control = control
+        self.isEnabled = isEnabled
         self.capturedHostPatterns = capturedHostPatterns
         self.productionHostPatterns = productionHostPatterns
         self.keepBreakpointsAcrossLaunches = keepBreakpointsAcrossLaunches

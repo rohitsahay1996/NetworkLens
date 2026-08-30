@@ -36,6 +36,17 @@ struct ExchangeListView: View {
         }
     }
 
+    /// Reports what it made, since the rules land in another tab and a button
+    /// that appears to do nothing gets pressed again.
+    private func capture(_ group: (screen: String, exchanges: [NetworkExchange])) {
+        let result = lens.captureScreen(named: group.screen, from: Array(group.exchanges.reversed()))
+        if result.rules == 0 && result.scenarios == 0 {
+            lens.notice = "Nothing to mock on \(group.screen) — no responses captured yet."
+        } else {
+            lens.notice = "\(group.screen): \(result.rules) rule(s), \(result.scenarios) scenario(s). Open Mocks to run them."
+        }
+    }
+
     private var list: some View {
         List {
             if groupsByScreen {
@@ -65,6 +76,21 @@ struct ExchangeListView: View {
                                 lens.copyCurl(for: Array(group.exchanges.reversed()))
                             } label: {
                                 Label("Copy", systemImage: "doc.on.doc")
+                                    .font(.caption2)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Color.accentColor)
+
+                            // One tap for the whole authoring step: every
+                            // endpoint on this screen gets a rule carrying its
+                            // captured response plus the standard variants, and
+                            // the screen gets a scenario per state. Typing that
+                            // by hand is the reason most people never mock at
+                            // all.
+                            Button {
+                                capture(group)
+                            } label: {
+                                Label("Mock screen", systemImage: "wand.and.stars")
                                     .font(.caption2)
                             }
                             .buttonStyle(.plain)
@@ -308,28 +334,47 @@ struct ExchangeRow: View {
     var showsLiveBadge = false
 
     var body: some View {
+        // Status over method in their own leading column, so the paths start at
+        // the same x down the whole list — the thing the eye actually scans.
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                state
+                MethodBadge(method: exchange.request.method)
+            }
+            .frame(minWidth: 52, alignment: .leading)
+
+            detail
+        }
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder
+    private var state: some View {
+        if isHeld {
+            Label("HELD", systemImage: "pause.fill")
+                .font(.caption2.bold())
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color.orange.opacity(0.18)))
+                .foregroundStyle(Color.orange)
+        } else if isHanging {
+            Label("LOADING", systemImage: "hourglass")
+                .font(.caption2.bold())
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color.purple.opacity(0.18)))
+                .foregroundStyle(Color.purple)
+        } else {
+            StatusPill(exchange: exchange)
+        }
+    }
+
+    private var detail: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
-                if isHeld {
-                    Label("HELD", systemImage: "pause.fill")
-                        .font(.caption2.bold())
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Color.orange.opacity(0.18)))
-                        .foregroundStyle(Color.orange)
-                } else if isHanging {
-                    Label("LOADING", systemImage: "hourglass")
-                        .font(.caption2.bold())
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Color.purple.opacity(0.18)))
-                        .foregroundStyle(Color.purple)
-                } else {
-                    StatusPill(exchange: exchange)
-                }
-                Text(exchange.endpointKey)
+                Text(exchange.endpointPath)
                     .font(.subheadline.weight(.medium))
-                    .lineLimit(1)
+                    .lineLimit(2)
                 Spacer(minLength: 4)
                 if let total = exchange.timing?.total {
                     Text(formatDuration(total))
@@ -362,7 +407,6 @@ struct ExchangeRow: View {
                     .lineLimit(1)
             }
         }
-        .padding(.vertical, 2)
     }
 }
 #endif

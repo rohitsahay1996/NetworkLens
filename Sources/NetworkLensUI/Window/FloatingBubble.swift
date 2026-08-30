@@ -21,6 +21,15 @@ struct FloatingBubble: View {
     /// looking at real data?" is a question that has to be answerable without
     /// opening anything.
     var isMocking = false
+    /// A host filter is hiding traffic, so `exchangeCount` is a subset rather
+    /// than the whole capture. Shown because the filter now survives relaunches
+    /// — a badge of 4 has to be distinguishable from a quiet app.
+    var isFiltering = false
+    /// Rendered directly above the bubble and dragged with it. The run bar uses
+    /// it: the tester has already parked the bubble somewhere that does not
+    /// cover what they are watching, and a control that ignored that would land
+    /// on top of the thing under test.
+    var accessory: AnyView?
     let onTap: () -> Void
 
     static let size: CGFloat = 56
@@ -39,8 +48,41 @@ struct FloatingBubble: View {
             // fills all available space: measuring or attaching a gesture after
             // it covers the whole screen, which reports the entire screen as
             // touchable and puts a screen-sized drag gesture over the app.
-            bubbleBody
-                .contentShape(Circle())
+            // The gesture and the hit-test frame stay on the stack rather than
+            // on the bubble alone, so the bar's buttons receive touches too —
+            // the window only passes through what the content reports.
+            VStack(spacing: 8) {
+                if let accessory {
+                    accessory
+                }
+                // Tap and drag belong to the bubble alone. Attached to the
+                // stack they would swallow every touch meant for the bar's
+                // buttons and open the inspector instead.
+                bubbleBody
+                    .contentShape(Circle())
+                    .onTapGesture(perform: onTap)
+                    .gesture(
+                        // Far enough that a sloppy tap is not stolen by the drag.
+                        DragGesture(minimumDistance: 8)
+                            .updating($isDragging) { _, state, _ in state = true }
+                            .onChanged { drag = $0.translation }
+                            .onEnded { value in
+                                let moved = CGPoint(
+                                    x: resting.x + value.translation.width,
+                                    y: resting.y + value.translation.height
+                                )
+                                // Free placement — no edge snapping. Clamped
+                                // only so it cannot be dropped somewhere it can
+                                // never be picked up again.
+                                let settled = BubblePosition.clamped(moved, in: geometry.size)
+                                withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                                    position = settled
+                                    drag = .zero
+                                }
+                                BubblePosition.save(settled, in: geometry.size)
+                            }
+                    )
+            }
                 // The window hit-tests against this rect, so it has to follow
                 // the bubble live — a stale frame means a dragged bubble that
                 // no longer takes taps.
@@ -51,28 +93,6 @@ struct FloatingBubble: View {
                             value: proxy.frame(in: .global)
                         )
                     }
-                )
-                .onTapGesture(perform: onTap)
-                // Far enough that a sloppy tap is not stolen by the drag.
-                .gesture(
-                    DragGesture(minimumDistance: 8)
-                        .updating($isDragging) { _, state, _ in state = true }
-                        .onChanged { drag = $0.translation }
-                        .onEnded { value in
-                            let moved = CGPoint(
-                                x: resting.x + value.translation.width,
-                                y: resting.y + value.translation.height
-                            )
-                            // Free placement — no edge snapping. Clamped only
-                            // so it cannot be dropped somewhere it can never be
-                            // picked up again.
-                            let settled = BubblePosition.clamped(moved, in: geometry.size)
-                            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
-                                position = settled
-                                drag = .zero
-                            }
-                            BubblePosition.save(settled, in: geometry.size)
-                        }
                 )
                 .position(
                     x: resting.x + drag.width,
@@ -105,11 +125,25 @@ struct FloatingBubble: View {
                     .offset(x: 4, y: -2)
             }
         }
+        .overlay(alignment: .bottomTrailing) {
+            if isFiltering {
+                Image(systemName: "line.3.horizontal.decrease.circle.fill")
+                    .font(.system(size: 15))
+                    .foregroundStyle(.secondary)
+                    .background(Circle().fill(.regularMaterial))
+                    .offset(x: 3, y: 3)
+            }
+        }
         .scaleEffect(isDragging ? 1.1 : 1)
         .accessibilityElement()
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel("NetworkLens")
-        .accessibilityValue("\(exchangeCount) requests captured")
+        .accessibilityValue(accessibilityValue)
+    }
+
+    private var accessibilityValue: String {
+        let base = "\(exchangeCount) requests captured"
+        return isFiltering ? base + ", host filter active" : base
     }
 
     private var icon: String {

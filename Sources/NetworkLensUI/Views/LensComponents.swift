@@ -78,6 +78,10 @@ struct LabelledRow: View {
     let label: String
     let value: String
     var monospaced: Bool = false
+    var isCopyable: Bool = false
+
+    /// What the copy button puts on the pasteboard, when that differs from what the row reads.
+    var copyValue: String?
 
     var body: some View {
         HStack(alignment: .top) {
@@ -88,8 +92,37 @@ struct LabelledRow: View {
                 .font(monospaced ? .system(.footnote, design: .monospaced) : .body)
                 .multilineTextAlignment(.trailing)
                 .textSelection(.enabled)
+            if isCopyable {
+                CopyValueButton(text: { copyValue ?? value }, accessibilityLabel: "Copy \(label)")
+            }
         }
         .font(.subheadline)
+    }
+}
+
+/// The request's verb, badged. Squared off rather than a `StatusPill` capsule, so two badges side by side do not read as one control.
+struct MethodBadge: View {
+
+    let method: String
+
+    var body: some View {
+        Text(method.uppercased())
+            .font(.system(size: 10, weight: .bold, design: .monospaced))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(RoundedRectangle(cornerRadius: 4).fill(tint.opacity(0.16)))
+            .foregroundStyle(tint)
+    }
+
+    private var tint: Color {
+        switch method.uppercased() {
+        case "GET": return .blue
+        case "POST": return .indigo
+        case "PUT": return .orange
+        case "PATCH": return .purple
+        case "DELETE": return .red
+        default: return .secondary
+        }
     }
 }
 
@@ -191,7 +224,7 @@ struct BodyView: View {
                     // Copies the whole payload in either mode. The tree draws a
                     // page at a time and the raw view is paged too, so without
                     // this there is no way to get a large body off the device.
-                    CopyBodyButton(text: { rendered.fullText })
+                    CopyValueButton(text: { rendered.fullText }, accessibilityLabel: "Copy body")
                 }
 
                 truncationNotice
@@ -208,7 +241,7 @@ struct BodyView: View {
                 HStack {
                     truncationNotice
                     Spacer(minLength: 8)
-                    CopyBodyButton(text: { rendered.fullText })
+                    CopyValueButton(text: { rendered.fullText }, accessibilityLabel: "Copy body")
                 }
                 PagedTextView(lines: rendered.lines).id(fingerprint)
             }
@@ -283,18 +316,13 @@ struct PagedTextView: View {
     }
 }
 
-/// Puts a whole body on the pasteboard, and says it did.
-///
-/// Confirms in place rather than through the detail screen's toast, because
-/// this sits inside `BodyView` — which the breakpoint and mock editors reuse,
-/// and neither of those has a toast. A copy button that gives no sign of
-/// having worked gets pressed four times.
-struct CopyBodyButton: View {
+/// Puts a value on the pasteboard and confirms in place, since some hosts — the mock and breakpoint editors — have no toast of their own.
+struct CopyValueButton: View {
 
-    /// A closure, not a `String`. Joining the lines back together is a whole
-    /// megabyte for the bodies this exists for, and passing the built value
-    /// would pay for it on every redraw to feed a button nobody has tapped.
+    /// A closure rather than a `String`, so building the value costs nothing until the button is actually tapped.
     let text: () -> String
+
+    var accessibilityLabel: String = "Copy"
 
     @State private var didCopy = false
 
@@ -310,7 +338,7 @@ struct CopyBodyButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(didCopy ? "Copied" : "Copy body")
+        .accessibilityLabel(didCopy ? "Copied" : accessibilityLabel)
         // Keyed on the flag, so a second tap restarts the countdown rather than
         // letting the first one clear the tick mid-confirmation.
         .task(id: didCopy) {

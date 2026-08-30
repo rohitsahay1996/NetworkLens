@@ -22,7 +22,13 @@ let package = Package(
         .target(name: "NetworkLensCore"),
         .target(name: "NetworkLensUI", dependencies: ["NetworkLensCore"]),
         .target(name: "NetworkLensNoOp"),
-        .testTarget(name: "NetworkLensCoreTests", dependencies: ["NetworkLensCore"]),
+        .testTarget(
+            name: "NetworkLensCoreTests",
+            dependencies: ["NetworkLensCore"],
+            // Real bytes captured off the sidecar, so the MCP server and the
+            // control channel's decoder cannot drift apart without a test
+            // going red.
+            resources: [.copy("Fixtures")]),
         // Compiles the README's UIKit lifecycle code. Empty on macOS, which is
         // the point: these are the snippets `swift test` can never check, so
         // they need an iOS simulator destination to mean anything.

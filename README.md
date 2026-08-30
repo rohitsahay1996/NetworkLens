@@ -29,7 +29,8 @@ Requires iOS 15+. No dependencies.
 11. [What it cannot see](#what-it-cannot-see)
 12. [Using it](#using-it)
 13. [Driving it from a UI test](#driving-it-from-a-ui-test)
-14. [API cheat sheet](#api-cheat-sheet)
+14. [Reading the trace from an agent](#reading-the-trace-from-an-agent) — the MCP server
+15. [API cheat sheet](#api-cheat-sheet)
 
 ---
 
@@ -508,13 +509,39 @@ identical API. You never edit the import.
 | Condition | Resolves to |
 |---|---|
 | `NETWORKLENS_DISABLED` defined | inert mirror |
-| `NETWORKLENS_ENABLED` defined | real tool |
-| `DEBUG` defined | real tool |
-| otherwise | inert mirror |
+| otherwise | real tool |
 
-Both override flags exist because "Release" and "shipping to the App Store" are
+Two switches, answering different questions. The one above is **compile time**:
+is the code in the binary at all. `LensConfiguration.isEnabled` is **runtime**:
+is it allowed to run. A feature flag can only ever answer the second — it cannot
+un-link a module — which is why both exist.
+
+```swift
+// Ships in every build, dormant unless the flag says otherwise.
+NetworkLens.start(configuration: LensConfiguration(isEnabled: staffFlag))
+```
+
+Off means off: no `URLProtocol` registration, no swizzling, no restored rules,
+no trace writer, no overlay. Not a filter that drops exchanges after capturing
+them. `canInit` re-checks the gate on every request, because
+`URLProtocol.registerClass` is process-wide and an earlier enabled `start()`
+cannot be un-registered out of a swizzle.
+
+**Read the flag at launch.** Interception only reaches sessions created after
+`start()`, so a flag resolved three seconds in has already missed the calls
+worth seeing. Cache the last known value, act on the cached one, refresh it for
+next launch.
+
+The lens does not key off `DEBUG`. "Release" and "shipping to the App Store" are
 not the same thing — a team handing TestFlight builds to QA needs the lens in a
-Release configuration.
+Release configuration, and configuration-sniffing left that team fighting the
+framework. So: real by default, opt out per configuration with
+`NETWORKLENS_DISABLED`.
+
+That default is deliberate and has teeth — every configuration that omits the
+flag links and runs the real interceptor, **including an App Store archive**. An
+app that must not ship the lens defines `NETWORKLENS_DISABLED` in its store
+configuration, or takes strategy 1 below.
 
 The mirror is a hand-written twin of the entire public API whose methods do
 nothing, so every call site compiles untouched. A dedicated test target compiles
@@ -529,14 +556,14 @@ exactly how the mirror once went several versions without
 
 **Three strategies, strictest first:**
 
-1. **Provable removal** — link `NetworkLensNoOp` in Release and `NetworkLensUI`
-   in Debug, no umbrella. Your release binary contains no lens code at all,
-   demonstrably.
-2. **Umbrella + flag** (the default above) — one import, both modules linked,
-   one compiled away. The linker strips the dead one in practice but does not
+1. **Provable removal** — link `NetworkLensNoOp` in your store configuration and
+   `NetworkLensUI` elsewhere, no umbrella. Your release binary contains no lens
+   code at all, demonstrably.
+2. **Umbrella + `NETWORKLENS_DISABLED`** — one import, both modules linked, one
+   compiled away. The linker strips the dead one in practice but does not
    guarantee it on paper.
-3. **Ship it deliberately** — some teams keep the lens in internal builds only,
-   distributed through TestFlight with `NETWORKLENS_ENABLED`.
+3. **Ship it everywhere** (the default above) — define nothing, and every build
+   carries the lens, TestFlight and App Store alike.
 
 Whichever you pick, keep `start()` and the overlay calls behind the same
 condition. `.networkLensOverlay()`, `attachOverlay(to:)`, `detachOverlay(from:)`
@@ -565,6 +592,7 @@ If step 2 never happens, see the next section.
 | No traffic at all | `start()` never ran, or ran after the session was built | Move `start()` earlier; see [the ordering rule](#the-one-ordering-rule) |
 | Some traffic missing | That session uses a configuration the lens never saw | `NetworkLens.install(into:)` on it |
 | One SDK's traffic missing | It builds its own configuration, or does not use `URLSession` | Configuration hook, or `record(_:)` |
+| A host's traffic missing, everything else fine | `capturedHostPatterns` is non-empty and that host is not in it, **or the Hosts list is locked** | Check the Session tab: a locked list shows a padlock and the unpinned hosts read "not captured". Unlock, or add the host to `capturedHostPatterns`. An excluded host is dropped at `canInit`, so mocks, breakpoints and replay cannot reach it either |
 | Nothing captured, no error | A background configuration | Check `NetworkLens.uninterceptable`; background transfers are impossible to intercept |
 | `WKWebView` requests missing | Out of `URLProtocol`'s reach | Not supported — see below |
 | Mocks not served | Master switch off, or rule disabled | Mocks tab → *Mocking enabled*; the bubble turns purple when mocks are serving |
@@ -593,9 +621,92 @@ Stated plainly, because discovering these by surprise wastes an afternoon:
   with their own transport.
 - **Streaming.** SSE and chunked responses are buffered, so they arrive all at
   once rather than incrementally.
+- **Any host you excluded.** `capturedHostPatterns` is empty by default, which
+  captures everything. Naming hosts turns it into an allowlist and everything
+  else is dropped at `canInit` — no capture, no trace line, and no mock,
+  breakpoint or replay on that host either. **Lock to shown** in the Session tab
+  does the same thing at runtime; see below.
 
 For the first three, `NetworkLens.record(_:)` puts an exchange on the timeline by
 hand, which is worth doing at the boundary of anything important.
+
+### Sharing scenarios
+
+A scenario is a set of pointers: endpoint key, match, variant. Sending someone
+that file alone gives them a scenario that resolves to nothing — and it fails
+quietly, applying and reporting success while the app serves live traffic. So
+the shareable unit is a **pack**: the scenarios plus the rules they reference,
+as one JSON file.
+
+From the Scenarios tab:
+
+| Action | What it does |
+|---|---|
+| **Export all as a pack…** | Every saved scenario plus its rules, named, out through the share sheet — Files, AirDrop, Slack |
+| Long-press a scenario → **Export as a pack…** | Just that one |
+| **Import a pack…** | Files picker; merges and reports what was added, replaced and unresolved |
+
+Bodies are redacted on the way out, because the file is going somewhere else —
+a repository, a ticket, a chat thread. `ScenarioPack.exporting(redactedBy: nil)`
+opts out for the case where a token's fidelity is what is being tested.
+
+Import replaces by endpoint key and match, never by id: the same endpoint mocked
+on two devices has two ids, and matching on those would duplicate every rule on
+every import. The pack wins on conflict — someone is being handed a state to
+reproduce, and a merge that kept half their local edits would reproduce
+something else — and the outcome says how much it overwrote.
+
+A pack that names a rule it does not carry says so before the file is written
+(`unresolved`), rather than on the other person's device where the only symptom
+is a scenario that does nothing.
+
+Packs are app content, not tool code: keep the real ones in the app's own
+repository, next to the endpoints they mock, so a pack changes in the same pull
+request as the API that changed.
+
+```swift
+let pack = ScenarioPack.exporting(Scenarios.shared.all, from: Mocks.shared.all, named: "Checkout states")
+try pack.encoded().write(to: url)
+
+let outcome = try ScenarioPack.decoding(Data(contentsOf: url)).import()
+outcome.isComplete   // false when an entry still points at nothing
+```
+
+### Locking the host list
+
+The Session tab's **Hosts** section carries two independent controls, and the
+difference matters:
+
+| Control | Scope | Effect |
+|---|---|---|
+| Checkmark | visibility | Hides a host from the Traffic list and the bubble badge. Still captured, still mockable, still breakpointable, still in Session stats. Persisted. |
+| **Padlock**, per row | capture | Pins that host. While any host is padlocked, those hosts are the only ones intercepted — everything else is dropped at `canInit`. Persisted, and applied before the first request of the next launch. |
+
+The padlock is per host rather than a single bulk action, because a lock is
+built up: pin one backend, watch a screen, pin a second when the next screen
+turns out to need it. Tap another row's padlock to add it; tap a closed one to
+drop it; **Unlock all** releases everything. Nothing has to be released to add
+something.
+
+Locking solves the problem the checkmark cannot: narrow to one backend, navigate
+to another screen, and that screen's SDKs and image CDNs pour into the 500-slot
+ring buffer and evict what you were reading. Hiding rows does not stop that;
+locking does.
+
+While locked, `capturedHostPatterns` is overridden — the tester's decision, made
+while looking at real traffic, outranks the one the app hardcoded at `start()`.
+Matching is exact host equality, with no suffix or wildcard expansion: the set
+comes from hosts the tool itself listed, and a lock that quietly admitted
+`eu.api.acme.com` because `api.acme.com` was pinned would not be a lock.
+
+Unpinned hosts stay listed rather than vanishing. Interception is what teaches
+the tool a host exists, so a lock would otherwise erase its own escape route —
+the next unknown domain would never appear anywhere, and you would have no way to
+add it. `HostInventory` records every host the capture gate is asked about,
+before the decision to drop it, so the list stays complete and any domain is one
+unlock away.
+
+Locking mid-session keeps what is already captured. Only new traffic is affected.
 
 ---
 
@@ -607,7 +718,8 @@ per-screen grouping, session stats.
 
 **Mock** — save any captured response as a named variant, then switch between
 `empty` / `500` / `expired token` in one tap. Scenarios flip a whole screen's
-endpoints at once. Scripts express sequences (fail → fail → succeed). Latency,
+endpoints at once, and **packs** take those scenarios off the device — see
+[Sharing scenarios](#sharing-scenarios). Scripts express sequences (fail → fail → succeed). Latency,
 transport failures as real `URLError`s, and a `.hang` outcome that holds a
 request open so the loading state is reachable at all.
 
@@ -719,8 +831,108 @@ last line for an id is its current state and the earlier ones are the audit
 trail. `TraceOptions(includesBodies: false)` keeps headers, status and timing
 without the payloads; the file rotates at `maxBytes` keeping one generation.
 
-`Tools/networklens-mcp` serves that file to Claude Code as MCP tools — list
-traffic, slice a body by JSON Pointer, diff two calls. See its README.
+### The control channel
+
+Rules normally reach the app through the session file, which it reads at
+`start()` — so a change means a relaunch, and a relaunch means losing whatever
+screen the tester had walked to. The control channel is the way around that.
+
+```swift
+LensConfiguration(
+    capturedHostPatterns: hosts,
+    persistsRules: true,
+    trace: TraceOptions(),
+    control: ControlOptions()
+)
+```
+
+The app then polls `http://127.0.0.1:8788/commands` every two seconds and
+applies whatever it collects. It **polls rather than listens** on purpose: a
+listener on iOS trips the local-network permission prompt and dies with the app,
+while a queue on the host survives the app being backgrounded, killed and
+relaunched.
+
+**There is nothing to start.** The queue is hosted by the `networklens` MCP
+server, which an MCP client launches from `.mcp.json` on its own — so a fresh
+clone is live with nothing extra installed. `lens_live` reports which endpoint
+is in use and whether an app is answering on it.
+
+Port 8788, deliberately not the browser sidecar's 8787: that one also serves
+`/ingest`, and taking it would send the extension's traces into a 404 whenever
+this server happened to start first. To drive an app from the browser sidecar
+instead, point this server at it and it will host nothing:
+
+```bash
+NETWORKLENS_SIDECAR=http://127.0.0.1:8787
+```
+
+| Verb | Does |
+|---|---|
+| `state` | Reports the rules, the master switch and the armed breakpoints |
+| `arm` | Adds a variant to an endpoint, creating the rule if there is none |
+| `disarm` | Disables one rule, or all of them with no `endpointKey` |
+| `variant` | Activates a variant by name, and names the available ones on a miss |
+| `scenario` | Imports a pack and applies its first scenario |
+| `edit` | Installs whole rules, drops rules by substring, sets the master switch |
+| `export` | Returns the device's rules and scenarios as a pack |
+
+The names match the browser lens exactly, so an agent's vocabulary does not fork
+per platform. `edit` is the one the MCP server uses: reading a trace and
+building a five-variant rule from it is logic that belongs where the trace is,
+so the wire carries the finished rule rather than describing it a field at a
+time.
+
+Two limits worth knowing. Loopback means the simulator and the host Mac, never a
+device. And breakpoints cannot be armed this way — `state` reports them, but no
+verb writes them.
+
+### The MCP server
+
+`Tools/networklens-mcp` serves that file to an MCP client such as Claude Code,
+so an agent reads the app's real requests instead of being told about them. Its
+write tools reach a running app through the control channel below, and fall back
+to the session file — which the app reads at launch — when nothing is listening.
+`lens_live` says which of the two a write is about to take.
+
+```bash
+cd Tools/networklens-mcp
+npm install && npm run build
+```
+
+Point it at a trace. Precedence is `NETWORKLENS_TRACE` →
+`NETWORKLENS_BUNDLE_ID` (booted simulator) → the host's own Application Support:
+
+```jsonc
+// .mcp.json, in the app repo
+{
+  "mcpServers": {
+    "networklens": {
+      "command": "node",
+      "args": ["/absolute/path/to/NetworkLens/Tools/networklens-mcp/dist/index.js"],
+      "env": { "NETWORKLENS_BUNDLE_ID": "com.example.myapp" }
+    }
+  }
+}
+```
+
+| Tool | Returns |
+|---|---|
+| `lens_status` | Trace path, exchange count, sessions. Start here when nothing else returns rows |
+| `lens_list` | One line per exchange — id, status, ms, size, screen, endpoint, flags. Never bodies |
+| `lens_get` | Headers, timing and metadata for one exchange |
+| `lens_body` | A JSON-Pointer slice of one body, or a depth-collapsed outline |
+| `lens_search` | Key/value match across bodies → pointers to read, not payloads |
+| `lens_stats` | Counts by status and endpoint, slowest calls, mocked vs live |
+| `lens_curl` | One request rebuilt as curl |
+| `lens_diff` | Two exchanges — status, timing, and which body pointers differ |
+
+Every tool is summary-first on purpose: a megabyte response pasted whole into a
+model's context makes its answers worse, not better, so bodies are reached
+through `lens_body` by pointer or depth cap and clipped at 8k characters even
+then. A physical device has no path the Mac can read — pull the container with
+Xcode (Devices → app → Download Container) and set `NETWORKLENS_TRACE` to the
+`trace.ndjson` inside it. Full detail in
+[`Tools/networklens-mcp/README.md`](Tools/networklens-mcp/README.md).
 
 ## API cheat sheet
 

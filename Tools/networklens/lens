@@ -1,0 +1,73 @@
+#!/bin/sh
+# NetworkLens dev/QA commands for this checkout.
+#
+# Everything here talks to the booted simulator, never to the build: mock rules
+# and the captured-host list are read by the app at launch, so a change costs a
+# relaunch and never a rebuild.
+#
+#   lens mock <args>       mock rules   (apply | list | seed | activate | on | off)
+#   lens trackers <args>   tracker QA   (--ids … | --new | --contract …)
+#   lens hosts [h1 h2 …]   show or set which hosts the lens captures
+#   lens doctor            simulator, trace, app state
+#
+# The bundle id comes from NETWORKLENS_BUNDLE_ID when set, else com.blibli.mobile.
+set -e
+DIR="$(cd "$(dirname "$0")" && pwd)"
+BUNDLE="${NETWORKLENS_BUNDLE_ID:-com.blibli.mobile}"
+HOSTS_KEY="NetworkLensCapturedHosts"
+
+command="$1"
+[ $# -gt 0 ] && shift
+
+case "$command" in
+    mock)
+        exec python3 "$DIR/write_mock.py" "$@"
+        ;;
+    trackers)
+        exec python3 "$DIR/extract_trackers.py" "$@"
+        ;;
+    hosts)
+        if [ $# -eq 0 ]; then
+            echo "captured hosts for $BUNDLE (empty means the compiled defaults apply):"
+            xcrun simctl spawn booted defaults read "$BUNDLE" "$HOSTS_KEY" 2>/dev/null || echo "  (not set)"
+            exit 0
+        fi
+        if [ "$1" = "--reset" ]; then
+            xcrun simctl spawn booted defaults delete "$BUNDLE" "$HOSTS_KEY" 2>/dev/null || true
+            echo "reset — the compiled defaults in NetworkLensBootstrap.swift apply again."
+            echo "Relaunch the app for it to take effect."
+            exit 0
+        fi
+        xcrun simctl spawn booted defaults write "$BUNDLE" "$HOSTS_KEY" -array "$@"
+        echo "captured hosts set to: $*"
+        echo "Relaunch the app — the list is read once, at start()."
+        ;;
+    doctor)
+        echo "== simulator =="
+        xcrun simctl list devices booted | sed -n '2,5p' || echo "  no booted simulator"
+        container="$(xcrun simctl get_app_container booted "$BUNDLE" data 2>/dev/null || true)"
+        if [ -z "$container" ]; then
+            printf '== app ==\n  %s is not installed on the booted simulator\n' "$BUNDLE"
+            exit 1
+        fi
+        printf '== app ==\n  %s\n' "$container"
+        trace="$container/Library/Application Support/NetworkLens/trace.ndjson"
+        session="$container/Library/Application Support/NetworkLens/session.json"
+        if [ -f "$trace" ]; then
+            printf '== trace ==\n  %s exchanges  (%s)\n' "$(wc -l < "$trace" | tr -d ' ')" "$trace"
+        else
+            printf '== trace ==\n  none yet — run the app with tracing on\n' 
+        fi
+        echo "== mocks =="
+        if [ -f "$session" ]; then
+            python3 "$DIR/write_mock.py" list
+        else
+            echo "  no session.json yet"
+        fi
+        echo "== captured hosts =="
+        xcrun simctl spawn booted defaults read "$BUNDLE" "$HOSTS_KEY" 2>/dev/null || echo "  (not set — compiled defaults apply)"
+        ;;
+    *)
+        sed -n '2,13p' "$0" | sed 's|^# \{0,1\}||'
+        ;;
+esac

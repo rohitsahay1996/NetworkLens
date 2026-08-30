@@ -117,6 +117,81 @@ public struct TraceOptions: Sendable {
     public static func defaultURL() -> URL { URL(fileURLWithPath: "/dev/null") }
 }
 
+// MARK: - Control channel
+
+public struct ControlOptions: Sendable {
+    public var endpoint: URL
+    public var pollInterval: TimeInterval
+    public var maxCommandsPerPoll: Int
+
+    public init(
+        endpoint: URL = ControlOptions.defaultEndpoint,
+        pollInterval: TimeInterval = 2,
+        maxCommandsPerPoll: Int = 20
+    ) {
+        self.endpoint = endpoint
+        self.pollInterval = pollInterval
+        self.maxCommandsPerPoll = maxCommandsPerPoll
+    }
+
+    public static let defaultEndpoint = URL(fileURLWithPath: "/dev/null")
+}
+
+public struct ControlCommand: Decodable, Sendable {
+    public var id: Int
+    public var kind: String
+    public var endpointKey: String?
+    public var variantName: String?
+    public var status: Int?
+    public var body: String?
+    public var delay: TimeInterval?
+    public var note: String?
+    public var rules: [MockRule]?
+    public var scenarios: [Scenario]?
+    public var removeEndpointKeys: [String]?
+    public var isMockingEnabled: Bool?
+}
+
+public struct ControlOutcome: Encodable, Sendable {
+    public var rules: [MockRule]?
+    public var isMockingEnabled: Bool?
+    public var appliedCount: Int?
+    public var missingEndpointKeys: [String]?
+    public var upsertedCount: Int?
+    public var removedCount: Int?
+
+    public init() {
+        // Nothing here ever fills a field; the shape exists so call sites compile.
+    }
+}
+
+public enum ControlError: Error {
+    case unknownCommand(String)
+    case emptyEdit
+    case missingEndpointKey
+    case missingPack
+    case missingScenario
+    case nothingArmed(String)
+    case noSuchVariant(endpointKey: String, wanted: String, available: String)
+}
+
+public final class LensControlChannel: @unchecked Sendable {
+    public static let shared = LensControlChannel()
+
+    public init() {
+        // Inert twin — nothing polls, so there is nothing to set up.
+    }
+
+    public var isRunning: Bool { false }
+    public func start(_ options: ControlOptions) {
+        // Inert: a release build must not open a socket to a developer's sidecar.
+    }
+
+    public func stop() {
+        // Nothing was started.
+    }
+}
+
 // MARK: - Configuration
 
 public struct LensConfiguration: Sendable {
@@ -132,6 +207,7 @@ public struct LensConfiguration: Sendable {
     public var persistsRules: Bool
     public var redactsPersistedRules: Bool
     public var trace: TraceOptions?
+    public var control: ControlOptions?
 
     public init(
         matchers: [RequestMatcher] = [PathMatcher()],
@@ -145,8 +221,10 @@ public struct LensConfiguration: Sendable {
         keepBreakpointsAcrossLaunches: Bool = false,
         persistsRules: Bool = false,
         redactsPersistedRules: Bool = true,
-        trace: TraceOptions? = nil
+        trace: TraceOptions? = nil,
+        control: ControlOptions? = nil
     ) {
+        self.control = control
         self.matchers = matchers
         self.redactor = redactor
         self.maxStoredExchanges = maxStoredExchanges

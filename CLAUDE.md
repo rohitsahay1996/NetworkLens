@@ -25,9 +25,12 @@ Sources/
   NetworkLensUI/      SwiftUI/UIKit overlay. Depends on Core.
   NetworkLensNoOp/    Inert mirror of the whole public surface. Depends on nothing.
 Tests/
-  NetworkLensCoreTests/    The real suite (~390 test funcs, runs on macOS).
+  NetworkLensCoreTests/    The real suite (~415 test funcs, runs on macOS).
   NetworkLensUITests/      Compiles README's UIKit snippets. Empty on macOS by design.
   NetworkLensNoOpTests/    API parity — fails the build when Core grows API NoOp lacks.
+Tools/
+  networklens-mcp/    TypeScript MCP server over the trace file. Not in Package.swift,
+                      not built by `swift build` — it ships in the repo, not in the binary.
 ```
 
 ### Target dependency rules — these are load-bearing
@@ -248,6 +251,37 @@ Core, UI, NoOp, persistence, mocking (variants / scripts / scenarios),
 breakpoints, perturbations, replay, curl export and launch-argument scenario
 activation are all shipped and covered by tests.
 
-Comments in Core still reference "milestone 4" — a headless CI trace written to
-disk as JSON. That is the main unbuilt piece; the redaction and clock seams
-(`Time/LensClock.swift`) were put in for it.
+`1.3.0` closed what Core's comments call "milestone 4": `Trace/TraceWriter.swift`
+writes redacted NDJSON to disk (off unless `TraceOptions` is passed), the
+`capturedHostPatterns` allowlist drops uninteresting hosts at `canInit` before
+they can evict real traffic from the ring buffer, and `Tools/networklens-mcp`
+serves the trace to Claude Code as read-only query tools. The redaction and
+clock seams (`Time/LensClock.swift`) were put in for exactly this.
+
+`Control/LensControlChannel.swift` closed the gap that made the MCP server
+read-only. The app polls a sidecar for commands and applies them to
+`Mocks.shared` and `Scenarios.shared` in memory, so an agent changes what is
+armed without a relaunch and without the tester losing the screen they were on.
+
+Polling rather than listening is the whole design: a listener on iOS trips the
+local-network prompt and dies with the app, while a queue on the host survives
+the app being killed and relaunched — which is the lifecycle a mock-and-check
+loop actually lives in. The verb names are the browser lens's, so one agent
+vocabulary covers both platforms.
+
+The queue itself is hosted by `Tools/networklens-mcp` (`src/queue.ts`) rather
+than by a separate process, because a separate process is a thing a teammate has
+to be given. That server already ships in the app repo and is already launched
+by `.mcp.json`, so hosting it there is what makes a fresh clone work with nothing
+extra installed. It binds 8788, not the browser sidecar's 8787: that one also
+serves `/ingest`, and taking it would send the extension's traces into a 404
+whenever the MCP server started first.
+
+`Tests/NetworkLensCoreTests/Fixtures/mcp-edit-command.json` is real bytes
+captured off that sidecar. The MCP server and this decoder are the seam that
+breaks silently, and a hand-written approximation of the payload cannot catch
+it — the first version of that test passed against an invented payload while the
+real one was missing a required key.
+
+Breakpoints are still not armable this way. `state` reports them; no verb writes
+them. That is the next piece if this direction is continued.

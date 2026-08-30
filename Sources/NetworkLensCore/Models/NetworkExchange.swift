@@ -192,6 +192,13 @@ public struct NetworkExchange: Identifiable, Codable, Sendable, Hashable {
     /// True until a response or failure lands.
     public var isInFlight: Bool { response == nil && failure == nil }
 
+    /// `endpointKey` without its leading HTTP method, so a key a matcher did not build from the method — `"GRAPHQL OpName"` — comes back whole.
+    public var endpointPath: String {
+        let prefix = request.method.uppercased() + " "
+        guard endpointKey.hasPrefix(prefix) else { return endpointKey }
+        return String(endpointKey.dropFirst(prefix.count))
+    }
+
     /// Copy carrying the finished response. Derives the 4xx/5xx failure bucket
     /// so callers cannot forget to.
     public func completed(response: ResponseSnapshot, timing: Timing?) -> NetworkExchange {

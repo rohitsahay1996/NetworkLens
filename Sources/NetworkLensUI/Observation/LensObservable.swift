@@ -296,6 +296,99 @@ public final class LensObservable: ObservableObject {
         Scenarios.shared.remove(id: scenario.id)
     }
 
+    // MARK: - Capture a screen
+
+    /// Turns one screen's traffic into rules and the scenarios to switch them.
+    ///
+    /// The whole authoring cost in one tap: a rule per endpoint carrying the
+    /// standard five variants, then a scenario per state that sets every one of
+    /// that screen's endpoints together. Grouped under the screen's name, so it
+    /// arrives as its own pack rather than loose in the list.
+    ///
+    /// Endpoints already mocked are left alone. Regenerating over a rule
+    /// someone has edited would silently discard their work, and the tester who
+    /// tapped this was asking for the endpoints they had *not* set up yet.
+    @discardableResult
+    public func captureScreen(
+        named screen: String,
+        from exchanges: [NetworkExchange]
+    ) -> (rules: Int, scenarios: Int) {
+        let existing = Set(Mocks.shared.all.map(\.endpointKey))
+        var seen = Set<String>()
+        var created: [MockRule] = []
+
+        for exchange in exchanges {
+            let key = exchange.endpointKey
+            guard !existing.contains(key), !seen.contains(key), exchange.response != nil else { continue }
+            seen.insert(key)
+            let rule = CapturedVariants.rule(for: exchange)
+            Mocks.shared.set(rule)
+            created.append(rule)
+        }
+
+        // Scenarios cover every endpoint of the screen, including the ones that
+        // were already mocked — the unit being switched is the screen, and a
+        // scenario that left one endpoint on yesterday's variant would produce a
+        // state nobody chose.
+        let keys = Set(exchanges.map(\.endpointKey))
+        let rules = Mocks.shared.all.filter { keys.contains($0.endpointKey) }
+        guard !rules.isEmpty else { return (created.count, 0) }
+
+        var scenarioCount = 0
+        for state in ["loaded", "empty", "500", "slow"] {
+            let entries: [Scenario.Entry] = rules.compactMap { rule in
+                guard let variant = rule.variants.first(where: { $0.name == state }) else { return nil }
+                return Scenario.Entry(
+                    endpointKey: rule.endpointKey,
+                    match: rule.match,
+                    variantID: variant.id,
+                    variantName: variant.name
+                )
+            }
+            guard !entries.isEmpty else { continue }
+            Scenarios.shared.save(Scenario(name: "\(screen) — \(state)", entries: entries, group: screen))
+            scenarioCount += 1
+        }
+
+        // The way back. Without it the only route to live traffic is switching
+        // every rule off by hand, and a tester who cannot get back distrusts
+        // everything they saw while mocked.
+        let live: [Scenario.Entry] = rules.compactMap { rule in
+            guard let variant = rule.variants.first else { return nil }
+            return Scenario.Entry(
+                endpointKey: rule.endpointKey,
+                match: rule.match,
+                variantID: variant.id,
+                variantName: variant.name,
+                isEnabled: false
+            )
+        }
+        if !live.isEmpty {
+            Scenarios.shared.save(Scenario(name: "\(screen) — live", entries: live, group: screen))
+            scenarioCount += 1
+        }
+
+        return (created.count, scenarioCount)
+    }
+
+    // MARK: - Packs
+
+    /// Bundles scenarios with the rules they reference, ready to leave the
+    /// device. Redacted, because that is where the file is going.
+    public func exportPack(_ scenarios: [Scenario], named name: String) -> ScenarioPack {
+        ScenarioPack.exporting(scenarios, from: Mocks.shared.all, named: name)
+    }
+
+    /// Reads a pack file and merges it in, reporting what changed.
+    ///
+    /// Throwing rather than swallowing: a tester who picked the wrong file
+    /// needs to be told, and "nothing happened" is the one outcome this whole
+    /// feature exists to avoid.
+    @discardableResult
+    public func importPack(from data: Data) throws -> ScenarioPack.ImportOutcome {
+        try ScenarioPack.decoding(data).import()
+    }
+
     /// The endpoints a screen hit, for scoping a scenario to it.
     public func endpointKeys(forScreen screen: String) -> Set<String> {
         _ = revision

@@ -26,6 +26,23 @@ public enum NetworkLens {
     public static func start(configuration: LensConfiguration = .default) {
         state.activate(with: configuration)
 
+        // Nothing below runs when the gate is shut, and that is the point: a
+        // dormant lens must not register a URLProtocol, swizzle a session,
+        // restore a rule or open a trace file. A disabled tool that still sat
+        // on the request path would be a production risk with none of the
+        // benefit — and the one thing this gate exists to promise is that an
+        // App Store build with the flag off behaves as if the package were not
+        // linked at all.
+        guard configuration.isEnabled else {
+            state.clearTraceWriter()
+            LensControlChannel.shared.stop()
+            // Registration is process-wide, so a previous enabled start in the
+            // same process has to be undone here. Swizzling cannot be, which is
+            // why `canInit` re-checks the gate rather than trusting this line.
+            URLProtocol.unregisterClass(LensURLProtocol.self)
+            return
+        }
+
         if configuration.persistsRules {
             // Restore decides for itself what may come back armed, so the
             // unconditional clear below would undo it.
@@ -51,6 +68,15 @@ public enum NetworkLens {
             // Leaving it attached would keep writing under a configuration that
             // says tracing is off.
             state.clearTraceWriter()
+        }
+
+        if let options = configuration.control {
+            LensControlChannel.shared.start(options)
+        } else {
+            // Same reason the trace writer is cleared above: a second start()
+            // without control options must not leave the first one's poller
+            // running under a configuration that says the channel is off.
+            LensControlChannel.shared.stop()
         }
 
         // After the restore, never before: a launch argument names a scenario
@@ -229,7 +255,28 @@ public enum NetworkLens {
 
     public static var configuration: LensConfiguration { state.configuration }
 
+    /// The capture decision for one host, and the only thing the interception
+    /// layer should ask.
+    ///
+    /// `HostLock` wins over `capturedHostPatterns` when it is live: the app
+    /// decided the patterns at `start()`, the tester decided the lock while
+    /// looking at the traffic, and the later, more specific decision is the one
+    /// that should hold.
+    ///
+    /// Records the host either way. This is the one place that sees a host
+    /// before the decision to drop it, so it is the only place the Hosts list
+    /// can be kept complete under a lock.
+    public static func capturesHost(_ host: String?) -> Bool {
+        HostInventory.shared.record(host)
+        if let verdict = HostLock.shared.verdict(for: host) { return verdict }
+        return state.configuration.capturesHost(host)
+    }
+
     public static var isActive: Bool { state.isActive }
+
+    /// Whether the gate is open. False in a build that linked the tool but was
+    /// never allowed to run it — the App Store case.
+    public static var isEnabled: Bool { state.configuration.isEnabled }
 
     /// Endpoint key for a request under the active matcher chain. Used by the
     /// interception layer and available to callers building `record(_:)`

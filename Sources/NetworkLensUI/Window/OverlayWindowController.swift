@@ -39,7 +39,7 @@ public final class OverlayWindowController {
         // bubble is, and the bubble moves, so the frame is reported live
         // rather than read once at attach time.
         let root = OverlayHostingController(
-            rootView: OverlayRootView { [weak window] frame in
+            rootView: OverlayRootView(scene: scene) { [weak window] frame in
                 window?.interactiveRects = [frame]
             }
         )
@@ -62,19 +62,29 @@ public final class OverlayWindowController {
 /// breakpoint sheet.
 struct OverlayRootView: View {
 
+    /// The scene this overlay belongs to, so a screenshot renders the right
+    /// window on iPad with two of them open.
+    let scene: UIWindowScene?
+
     /// Reports the bubble's window-space frame so `PassthroughWindow` can hit
     /// test against it.
     let onBubbleFrameChange: (CGRect) -> Void
 
     @StateObject private var lens = LensObservable.shared
+    @ObservedObject private var hostFilter = HostFilter.shared
+    @ObservedObject private var runner = ScenarioRunner.shared
     @State private var isInspectorPresented = false
 
     var body: some View {
         FloatingBubble(
-            exchangeCount: lens.exchanges.count,
+            exchangeCount: visibleExchangeCount,
             hasArmedBreakpoints: lens.breakpoints.contains { $0.isEnabled },
             isHolding: lens.presentation.isHolding,
-            isMocking: lens.isServingMocks
+            isMocking: lens.isServingMocks,
+            isFiltering: hostFilter.isActive,
+            accessory: runner.isRunning
+                ? AnyView(RunBar(runner: runner, scene: scene))
+                : nil
         ) {
             isInspectorPresented = true
         }
@@ -85,6 +95,12 @@ struct OverlayRootView: View {
         // the traffic list will still be there afterwards.
         .onChange(of: lens.presentation.isHolding) { isHolding in
             if isHolding { isInspectorPresented = false }
+        }
+        // Starting a run closes the inspector: the tester needs the app on
+        // screen, and the first Capture would otherwise photograph the sheet
+        // they started the run from.
+        .onChange(of: runner.isRunning) { isRunning in
+            if isRunning { isInspectorPresented = false }
         }
         .sheet(isPresented: $isInspectorPresented) {
             InspectorView()
@@ -105,6 +121,14 @@ struct OverlayRootView: View {
                         .interactiveDismissDisabled()
                 }
         )
+    }
+
+    /// Counts only the hosts left visible in the Session tab's host filter.
+    /// A badge reading 300 while the Traffic list shows 12 is unreadable as a
+    /// signal for the one host being worked on.
+    private var visibleExchangeCount: Int {
+        guard hostFilter.isActive else { return lens.exchanges.count }
+        return lens.exchanges.filter { hostFilter.isVisible($0.hostLabel) }.count
     }
 }
 

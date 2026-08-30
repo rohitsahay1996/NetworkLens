@@ -34,6 +34,27 @@ export async function resolveTracePath(): Promise<{ path: string; how: string }>
 }
 
 /**
+ * Whether the app is currently running on the booted simulator.
+ *
+ * Matters because the app owns `session.json` while it lives: it reads the file
+ * at `start()` and autosaves its in-memory state back over it on every edit. A
+ * write made while it runs is overwritten within seconds, and the only symptom
+ * is an empty Mocks tab — which reads as the tool being broken rather than as a
+ * race that was always going to be lost.
+ *
+ * Unknown counts as not running: `launchctl` inside a simulator is best-effort,
+ * and refusing a legitimate write because a probe failed is the worse error.
+ */
+export async function isAppRunning(bundleId: string): Promise<boolean> {
+  try {
+    const { stdout } = await run("xcrun", ["simctl", "spawn", "booted", "launchctl", "list"]);
+    return stdout.split("\n").some((line) => line.includes(`UIKitApplication:${bundleId}`));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Data container of an app installed on the booted simulator.
  *
  * `simctl` returns the *data* container, which is the one holding Application

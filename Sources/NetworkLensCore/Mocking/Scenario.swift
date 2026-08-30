@@ -24,6 +24,18 @@ public struct Scenario: Codable, Sendable, Hashable, Identifiable {
     public var entries: [Entry]
     public var createdAt: Date
 
+    /// Which pack this came from, or nil for one saved on the device.
+    ///
+    /// A tester is handed several features at once — flash sale, PDP, checkout
+    /// — and a flat list of thirty scenarios from three packs is unreadable and
+    /// unsafe: "empty" means a different screen depending on which pack it came
+    /// from. The group is stamped at import rather than derived from the name,
+    /// so a scenario keeps its provenance even after someone renames it.
+    ///
+    /// Optional, and decoded as absent rather than required, so a scenario
+    /// saved before packs existed still loads.
+    public var group: String?
+
     /// One endpoint's part in the setup.
     public struct Entry: Codable, Sendable, Hashable {
 
@@ -66,12 +78,14 @@ public struct Scenario: Codable, Sendable, Hashable, Identifiable {
         id: UUID = UUID(),
         name: String,
         entries: [Entry],
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        group: String? = nil
     ) {
         self.id = id
         self.name = name
         self.entries = entries
         self.createdAt = createdAt
+        self.group = group
     }
 
     /// Short summary for a list: `3 endpoints · empty cart, 500, loaded`.
