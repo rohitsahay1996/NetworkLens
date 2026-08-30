@@ -592,6 +592,7 @@ If step 2 never happens, see the next section.
 | No traffic at all | `start()` never ran, or ran after the session was built | Move `start()` earlier; see [the ordering rule](#the-one-ordering-rule) |
 | Some traffic missing | That session uses a configuration the lens never saw | `NetworkLens.install(into:)` on it |
 | One SDK's traffic missing | It builds its own configuration, or does not use `URLSession` | Configuration hook, or `record(_:)` |
+
 | A host's traffic missing, everything else fine | `capturedHostPatterns` is non-empty and that host is not in it, **or the Hosts list is locked** | Check the Session tab: a locked list shows a padlock and the unpinned hosts read "not captured". Unlock, or add the host to `capturedHostPatterns`. An excluded host is dropped at `canInit`, so mocks, breakpoints and replay cannot reach it either |
 | Nothing captured, no error | A background configuration | Check `NetworkLens.uninterceptable`; background transfers are impossible to intercept |
 | `WKWebView` requests missing | Out of `URLProtocol`'s reach | Not supported — see below |
@@ -886,13 +887,13 @@ Two limits worth knowing. Loopback means the simulator and the host Mac, never a
 device. And breakpoints cannot be armed this way — `state` reports them, but no
 verb writes them.
 
-### The MCP server
 
 `Tools/networklens-mcp` serves that file to an MCP client such as Claude Code,
 so an agent reads the app's real requests instead of being told about them. Its
 write tools reach a running app through the control channel below, and fall back
 to the session file — which the app reads at launch — when nothing is listening.
 `lens_live` says which of the two a write is about to take.
+
 
 ```bash
 cd Tools/networklens-mcp

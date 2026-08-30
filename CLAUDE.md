@@ -285,3 +285,7 @@ real one was missing a required key.
 
 Breakpoints are still not armable this way. `state` reports them; no verb writes
 them. That is the next piece if this direction is continued.
+
+The MCP server is read-only by design — arming a mock from an agent needs a
+control channel into the running app, which does not exist yet. That is the next
+piece if this direction is continued.
